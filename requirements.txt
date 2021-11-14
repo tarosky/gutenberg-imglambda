@@ -1,0 +1,6 @@
+autopep8==1.5.7
+aiobotocore==2.0.0
+flake8==3.9.2
+isort==5.9.3
+pep8==1.7.1
+yapf==0.31.0

@@ -1,0 +1,7 @@
+#!/bin/bash
+
+if [ "$(uname)" == 'Darwin' ]; then
+  fswatch -e '^\./(\.git|work|\.venv|temp)|__pycache__' -r ./ | python script/watch.py
+else
+  inotifywait -e close_write --exclude '^\./(\.git|work|\.venv|temp)|__pycache__' -m -r ./ | python script/watch.py
+fi
