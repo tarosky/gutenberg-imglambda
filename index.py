@@ -12,9 +12,7 @@ from botocore.exceptions import ClientError
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
-PATH_METADATA = 'original-path'
 TIMESTAMP_METADATA = 'original-timestamp'
-RES_CACHE_CONTROL = 'x-res-cache-control'
 HEADERS = 'headers'
 
 image_exts = set([
@@ -98,8 +96,14 @@ class ImgServer:
     temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
 
     server_key = (
-        region, s3_domain, public_content_bucket, s3_prefix, sqs_queue_url,
-        perm_resp_max_age, temp_resp_max_age)
+        region,
+        s3_domain,
+        public_content_bucket,
+        s3_prefix,
+        sqs_queue_url,
+        perm_resp_max_age,
+        temp_resp_max_age,
+    )
 
     if server_key not in cls.instances:
       sess = session.get_session()
@@ -273,9 +277,9 @@ async def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
     req['origin']['s3']['path'] = field_update.origin_path
 
   if field_update.res_cache_control is not None:
-    req[HEADERS][RES_CACHE_CONTROL] = {
-        'key': RES_CACHE_CONTROL,
-        'value': 'public, max-age={}'.format(field_update.res_cache_control),
+    req[HEADERS]['x-res-cache-control'] = {
+        'key': 'X-Res-Cache-Control',
+        'value': field_update.res_cache_control,
     }
 
   return req
