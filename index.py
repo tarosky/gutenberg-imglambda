@@ -3,7 +3,7 @@ import dataclasses
 import json
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from aiobotocore import session
 from aiobotocore.client import AioBaseClient
@@ -41,6 +41,17 @@ class FieldUpdate:
   origin_path: Optional[str] = None
 
 
+@dataclasses.dataclass
+class XParams:
+  region: str
+  s3_domain: str
+  public_content_bucket: str
+  s3_prefix: str
+  sqs_queue_url: str
+  perm_resp_max_age: int
+  temp_resp_max_age: int
+
+
 def json_dump(obj: Any) -> str:
   return json.dumps(obj, separators=(',', ':'), sort_keys=True)
 
@@ -59,7 +70,7 @@ def get_normalized_extension(path: str) -> str:
 
 
 class ImgServer:
-  instances: Dict[Tuple[str, str, str, str, str, int, int], 'ImgServer'] = {}
+  instances: Dict[XParams, 'ImgServer'] = {}
 
   def __init__(
       self,
@@ -95,15 +106,14 @@ class ImgServer:
     perm_resp_max_age: int = int(req[HEADERS]['x-env-perm-resp-max-age'])
     temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
 
-    server_key = (
-        region,
-        s3_domain,
-        public_content_bucket,
-        s3_prefix,
-        sqs_queue_url,
-        perm_resp_max_age,
-        temp_resp_max_age,
-    )
+    server_key = XParams(
+        region=region,
+        s3_domain=s3_domain,
+        public_content_bucket=public_content_bucket,
+        s3_prefix=s3_prefix,
+        sqs_queue_url=sqs_queue_url,
+        perm_resp_max_age=perm_resp_max_age,
+        temp_resp_max_age=temp_resp_max_age)
 
     if server_key not in cls.instances:
       sess = session.get_session()
@@ -121,6 +131,10 @@ class ImgServer:
           temp_resp_max_age=temp_resp_max_age)
 
     return cls.instances[server_key]
+
+  async def close(self) -> None:
+    await self.s3.__aexit__()
+    await self.sqs.__aexit__()
 
   def as_permanent(self, update: FieldUpdate) -> FieldUpdate:
     update.res_cache_control = 'public, max-age={}'.format(
