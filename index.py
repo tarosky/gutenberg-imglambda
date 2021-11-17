@@ -144,7 +144,7 @@ class ImgServer:
   async def get_time_original(self, path: str) -> Optional[str]:
     try:
       res: Dict[str, Any] = await self.s3.head_object(
-          Bucket=self.s3_bucket, Key=self.s3_prefix + path)
+          Bucket=self.public_content_bucket, Key=path)
     except ClientError as e:
       if is_no_such_key_client_error(e):
         return None
