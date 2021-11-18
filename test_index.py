@@ -1,5 +1,8 @@
+import datetime
+import json
 import os
 import secrets
+from typing import Any, Dict, List, Optional
 
 from aiobotocore import session
 
@@ -8,6 +11,15 @@ from index import ImgServer
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
 TEMP_RESP_MAX_AGE = 20 * 60
 S3_PREFIX = 'prefix'
+REGION = 'ap-northeast-1'
+
+CSS_MIME = 'text/css'
+GIF_MIME = "image/gif"
+JPEG_MIME = 'image/jpeg'
+JS_MIME = "text/javascript"
+PNG_MIME = 'image/png'
+SOURCE_MAP_MIME = 'application/octet-stream'
+WEBP_MIME = "image/webp"
 
 
 def read_test_config(name: str) -> str:
@@ -21,100 +33,106 @@ def generate_safe_random_string() -> str:
 
 
 async def create_img_server(name: str) -> ImgServer:
-  region = 'ap-northeast-1'
   account_id = read_test_config('aws-account-id')
   sqs_name = f'test-{name}-{generate_safe_random_string()}'
   access_key_id = read_test_config('access-key-id')
-  s3_bucket = read_test_config('s3-bucket')
   secret_access_key = read_test_config('secret-access-key')
 
   sess = session.get_session()
   sqs = await sess.create_client(
       'sqs',
-      region_name=region,
+      region_name=REGION,
       aws_access_key_id=access_key_id,
       aws_secret_access_key=secret_access_key).__aenter__()
   s3 = await sess.create_client(
       's3',
-      region_name=region,
+      region_name=REGION,
       aws_access_key_id=access_key_id,
       aws_secret_access_key=secret_access_key).__aenter__()
 
   return ImgServer(
-      region=region,
+      region=REGION,
       sqs=sqs,
       s3=s3,
-      s3_domain=f'{generate_safe_random_string()}.s3.example.com',
-      public_content_bucket=read_test_config('public-content-bucket'),
-      s3_prefix=S3_PREFIX,
+      generated_domain=f"{read_test_config('s3-bucket')}.s3.example.com",
+      original_bucket=read_test_config('public-content-bucket'),
+      generated_key_prefix=S3_PREFIX,
       sqs_queue_url=(
-          f'https://sqs.{region}.amazonaws.com/{account_id}/{sqs_name}'),
+          f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
       perm_resp_max_age=PERM_RESP_MAX_AGE,
       temp_resp_max_age=TEMP_RESP_MAX_AGE)
 
 
-# func getTestSQSQueueNameFromURL(url string) string {
-# 	parts := strings.Split(url, "/")
-# 	return parts[len(parts)-1]
-# }
+def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
+  return sqs_queue_url.split('/')[-1]
 
-# func newTestEnvironment(ctx context.Context, name string, s *TestSuite) *Environment {
-# 	e := NewEnvironment(ctx, getTestConfig(name))
 
-# 	sqsName := getTestSQSQueueNameFromURL(e.SQSQueueURL)
+async def create_test_environment(name: str) -> ImgServer:
+  img_server = await create_img_server(name)
+  await img_server.sqs.create_queue(
+      QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url),
+      tags={
+          'tarosky:type': 'test',
+          'tarosky:repo': 'https://github.com/tarosky/gutenberg-imglambda',
+      })
+  return img_server
 
-# 	_, err := e.SQSClient.CreateQueue(s.ctx, &sqs.CreateQueueInput{
-# 		QueueName: &sqsName,
-# 	})
-# 	require.NoError(s.T(), err, "failed to create SQS queue")
 
-# 	return e
-# }
+async def clean_test_environment(img_server: ImgServer) -> None:
+  await img_server.sqs.delete_queue(QueueUrl=img_server.sqs_queue_url)
 
-# func initTestSuite(name string, t require.TestingT) *TestSuite {
-# 	InitTest()
-# 	require.NoError(t, os.RemoveAll("work/test/"+name), "failed to remove directory")
-# 	ctx := context.Background()
 
-# 	return &TestSuite{ctx: ctx}
-# }
+async def put_original(
+    img_server: ImgServer,
+    key: str,
+    name: str,
+    mime: str,
+) -> None:
+  path = f'{os.getcwd()}/samplefile/original/{name}'
+  with open(path, 'r') as f:
+    await img_server.s3.put_object(
+        Body=f,
+        Bucket=img_server.original_bucket,
+        ContentType=mime,
+        Key=key,
+    )
 
-# func cleanTestEnvironment(ctx context.Context, s *TestSuite) {
-# 	if _, err := s.env.SQSClient.DeleteQueue(ctx, &sqs.DeleteQueueInput{
-# 		QueueUrl: &s.env.SQSQueueURL,
-# 	}); err != nil {
-# 		s.env.log.Error("failed to clean up SQS queue", zap.Error(err))
-# 	}
-# }
 
-# // TestSuite holds configs and sessions required to execute program.
-# type TestSuite struct {
-# 	suite.Suite
-# 	env *Environment
-# 	ctx context.Context
-# }
+async def put_generated(
+    img_server: ImgServer,
+    key: str,
+    name: str,
+    mime: str,
+) -> None:
+  path = f'{os.getcwd()}/samplefile/generated/{name}'
+  with open(path, 'r') as f:
+    await img_server.s3.put_object(
+        Body=f,
+        Bucket=img_server.generated_bucket,
+        ContentType=mime,
+        Key=key,
+    )
 
-# func copy(ctx context.Context, src, dst string, s *TestSuite) {
-# 	in, err := os.Open(src)
-# 	s.Require().NoError(err)
-# 	defer func() {
-# 		s.Require().NoError(in.Close())
-# 	}()
 
-# 	info, err := in.Stat()
-# 	s.Require().NoError(err)
+async def get_original_object_time(
+    img_server: ImgServer,
+    key: str,
+) -> datetime.datetime:
+  res: Dict[str, Any] = await img_server.s3.head_object(
+      Bucket=img_server.original_bucket, Key=key)
+  return res['LastModified']
 
-# 	{
-# 		_, err := s.env.S3Client.PutObject(ctx, &s3.PutObjectInput{
-# 			Bucket:       &s.env.S3Bucket,
-# 			Key:          &dst,
-# 			Body:         in,
-# 			StorageClass: types.StorageClassStandardIa,
-# 			Metadata: map[string]string{
-# 				pathMetadata:      src,
-# 				timestampMetadata: info.ModTime().UTC().Format(time.RFC3339Nano),
-# 			},
-# 		})
-# 		s.Require().NoError(err)
-# 	}
-# }
+
+async def receive_sqs_message(
+    img_server: ImgServer) -> Optional[Dict[str, str]]:
+  res: Dict[str, List[Dict[str, Any]]] = await img_server.sqs.receive_messages(
+      QueueUrl=img_server.sqs_queue_url,
+      MaxNumberOfMessages=1,
+      VisibilityTimeout=1,
+      WaitTimeSeconds=1)
+  msgs = res['Messages']
+  if len(msgs) == 0:
+    return None
+  body: str = msgs[0]['Body']
+  obj: Dict[str, str] = json.loads(body)
+  return obj

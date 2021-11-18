@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import datetime
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from typing import Any, Dict, Optional
 from aiobotocore import session
 from aiobotocore.client import AioBaseClient
 from botocore.exceptions import ClientError
+from dateutil import parser
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
@@ -44,9 +46,9 @@ class FieldUpdate:
 @dataclasses.dataclass
 class XParams:
   region: str
-  s3_domain: str
-  public_content_bucket: str
-  s3_prefix: str
+  generated_domain: str
+  original_bucket: str
+  generated_key_prefix: str
   sqs_queue_url: str
   perm_resp_max_age: int
   temp_resp_max_age: int
@@ -77,9 +79,9 @@ class ImgServer:
       region: str,
       sqs: AioBaseClient,
       s3: AioBaseClient,
-      s3_domain: str,
-      public_content_bucket: str,
-      s3_prefix: str,
+      generated_domain: str,
+      original_bucket: str,
+      generated_key_prefix: str,
       sqs_queue_url: str,
       perm_resp_max_age: int,
       temp_resp_max_age: int,
@@ -87,10 +89,10 @@ class ImgServer:
     self.region = region
     self.sqs = sqs
     self.s3 = s3
-    self.s3_domain = s3_domain
-    self.s3_bucket = s3_domain.split('.', 1)[0]
-    self.public_content_bucket = public_content_bucket
-    self.s3_prefix = s3_prefix
+    self.generated_domain = generated_domain
+    self.generated_bucket = generated_domain.split('.', 1)[0]
+    self.original_bucket = original_bucket
+    self.generated_key_prefix = generated_key_prefix
     self.sqs_queue_url = sqs_queue_url
     self.perm_resp_max_age = perm_resp_max_age
     self.temp_resp_max_age = temp_resp_max_age
@@ -98,19 +100,18 @@ class ImgServer:
   @classmethod
   async def from_lambda(cls, req: Dict[str, Any]) -> 'ImgServer':
     region: str = req[HEADERS]['x-env-region']
-    s3_domain: str = req[HEADERS]['x-env-s3-dns']
-    public_content_bucket: str = req['origin']['s3']['domainName'].split(
-        '.', 1)[0]
-    s3_prefix: str = req[HEADERS]['x-env-s3-prefix']
+    generated_domain: str = req[HEADERS]['x-env-generated-domain']
+    original_bucket: str = req['origin']['s3']['domainName'].split('.', 1)[0]
+    generated_key_prefix: str = req[HEADERS]['x-env-generated-key-prefix']
     sqs_queue_url: str = req[HEADERS]['x-env-sqs-queue-url']
     perm_resp_max_age: int = int(req[HEADERS]['x-env-perm-resp-max-age'])
     temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
 
     server_key = XParams(
         region=region,
-        s3_domain=s3_domain,
-        public_content_bucket=public_content_bucket,
-        s3_prefix=s3_prefix,
+        generated_domain=generated_domain,
+        original_bucket=original_bucket,
+        generated_key_prefix=generated_key_prefix,
         sqs_queue_url=sqs_queue_url,
         perm_resp_max_age=perm_resp_max_age,
         temp_resp_max_age=temp_resp_max_age)
@@ -123,9 +124,9 @@ class ImgServer:
           region=region,
           sqs=sqs,
           s3=s3,
-          s3_domain=s3_domain,
-          public_content_bucket=public_content_bucket,
-          s3_prefix=s3_prefix,
+          generated_domain=generated_domain,
+          original_bucket=original_bucket,
+          generated_key_prefix=generated_key_prefix,
           sqs_queue_url=sqs_queue_url,
           perm_resp_max_age=perm_resp_max_age,
           temp_resp_max_age=temp_resp_max_age)
@@ -148,17 +149,17 @@ class ImgServer:
 
   def origin_as_generated(
       self, gen_key: str, update: FieldUpdate) -> FieldUpdate:
-    update.origin_domain = self.s3_domain
+    update.origin_domain = self.generated_domain
     update.origin_path = gen_key
     return update
 
   def supports_webp(self, accept_header: str) -> bool:
     return 'image/webp' in accept_header
 
-  async def get_time_original(self, path: str) -> Optional[str]:
+  async def get_time_original(self, path: str) -> Optional[datetime.datetime]:
     try:
       res: Dict[str, Any] = await self.s3.head_object(
-          Bucket=self.public_content_bucket, Key=path)
+          Bucket=self.original_bucket, Key=path)
     except ClientError as e:
       if is_no_such_key_client_error(e):
         return None
@@ -166,37 +167,45 @@ class ImgServer:
 
     return res['LastModified']
 
-  async def get_time_generated(self, path: str) -> Optional[str]:
+  async def get_time_generated(self, path: str) -> Optional[datetime.datetime]:
     try:
       res: Dict[str, Any] = await self.s3.head_object(
-          Bucket=self.s3_bucket, Key=self.s3_prefix + path)
+          Bucket=self.generated_bucket, Key=self.generated_key_prefix + path)
     except ClientError as e:
       if is_no_such_key_client_error(e):
         return None
       raise e
 
-    return res['Metadata'].get(TIMESTAMP_METADATA, None)
+    t_str: Optional[str] = res['Metadata'].get(TIMESTAMP_METADATA, None)
+    if t_str is None:
+      return None
+    return parser.parse(t_str)
 
   def needs_generation(
-      self, t_orig: Optional[str], t_gen: Optional[str]) -> bool:
+      self, t_orig: Optional[datetime.datetime],
+      t_gen: Optional[datetime.datetime]) -> bool:
     return t_gen is None or t_gen != t_orig
 
   async def keep_uptodate(
-      self, path: str, t_orig: Optional[str], t_gen: Optional[str]) -> None:
+      self,
+      path: str,
+      t_orig: Optional[datetime.datetime],
+      t_gen: Optional[datetime.datetime],
+  ) -> None:
     if not self.needs_generation(t_orig, t_gen):
       return
 
     await self.sqs.send_message(
         QueueUrl=self.sqs_queue_url,
         MessageBody=json_dump({
-            'bucket': self.s3_bucket,
+            'bucket': self.generated_bucket,
             'path': path,
         }))
     log.debug(
         json_dump(
             {
                 'message': 'enqueued',
-                'bucket': self.s3_bucket,
+                'bucket': self.generated_bucket,
                 'path': path,
             }))
 
@@ -258,7 +267,7 @@ class ImgServer:
 
   async def process(self, path: str, accept_header: str) -> FieldUpdate:
     ext = get_normalized_extension(path)
-    gen_key = self.s3_prefix + path
+    gen_key = self.generated_key_prefix + path
 
     if ext in image_exts:
       if self.supports_webp(accept_header):
