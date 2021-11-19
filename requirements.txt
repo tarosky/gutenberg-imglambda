@@ -1,7 +1,10 @@
-aiobotocore==2.0.0
 autopep8==1.5.7
+boto3==1.20.8
 flake8==3.9.2
 isort==5.9.3
+mypy_boto3_s3==1.20.1
+mypy_boto3_sqs==1.20.1
+mypy-boto3-builder==5.5.0
 mypy==0.910
 pep8==1.7.1
 python-dateutil==2.8.2

@@ -1,4 +1,3 @@
-import asyncio
 import dataclasses
 import datetime
 import json
@@ -6,10 +5,11 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from aiobotocore import session
-from aiobotocore.client import AioBaseClient
+import boto3
 from botocore.exceptions import ClientError
 from dateutil import parser
+from mypy_boto3_s3.client import S3Client
+from mypy_boto3_sqs.client import SQSClient
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
@@ -58,8 +58,8 @@ def json_dump(obj: Any) -> str:
   return json.dumps(obj, separators=(',', ':'), sort_keys=True)
 
 
-def is_no_such_key_client_error(exception: ClientError) -> bool:
-  return exception['Error']['Code'] == 'NoSuchKey'
+def is_not_found_client_error(exception: ClientError) -> bool:
+  return exception.response['Error']['Code'] == '404'
 
 
 def get_normalized_extension(path: str) -> str:
@@ -77,8 +77,8 @@ class ImgServer:
   def __init__(
       self,
       region: str,
-      sqs: AioBaseClient,
-      s3: AioBaseClient,
+      sqs: SQSClient,
+      s3: S3Client,
       generated_domain: str,
       original_bucket: str,
       generated_key_prefix: str,
@@ -98,7 +98,7 @@ class ImgServer:
     self.temp_resp_max_age = temp_resp_max_age
 
   @classmethod
-  async def from_lambda(cls, req: Dict[str, Any]) -> 'ImgServer':
+  def from_lambda(cls, req: Dict[str, Any]) -> 'ImgServer':
     region: str = req[HEADERS]['x-env-region']
     generated_domain: str = req[HEADERS]['x-env-generated-domain']
     original_bucket: str = req['origin']['s3']['domainName'].split('.', 1)[0]
@@ -117,9 +117,8 @@ class ImgServer:
         temp_resp_max_age=temp_resp_max_age)
 
     if server_key not in cls.instances:
-      sess = session.get_session()
-      sqs = await sess.create_client('sqs', region_name=region).__aenter__()
-      s3 = await sess.create_client('s3', region_name=region).__aenter__()
+      sqs = boto3.client('sqs', region_name=region)
+      s3 = boto3.client('s3', region_name=region)
       cls.instances[server_key] = cls(
           region=region,
           sqs=sqs,
@@ -133,18 +132,12 @@ class ImgServer:
 
     return cls.instances[server_key]
 
-  async def close(self) -> None:
-    await self.s3.__aexit__()
-    await self.sqs.__aexit__()
-
   def as_permanent(self, update: FieldUpdate) -> FieldUpdate:
-    update.res_cache_control = 'public, max-age={}'.format(
-        self.perm_resp_max_age)
+    update.res_cache_control = f'public, max-age={self.perm_resp_max_age}'
     return update
 
   def as_temporary(self, update: FieldUpdate) -> FieldUpdate:
-    update.res_cache_control = 'public, max-age={}'.format(
-        self.temp_resp_max_age)
+    update.res_cache_control = f'public, max-age={self.temp_resp_max_age}'
     return update
 
   def origin_as_generated(
@@ -156,23 +149,23 @@ class ImgServer:
   def supports_webp(self, accept_header: str) -> bool:
     return 'image/webp' in accept_header
 
-  async def get_time_original(self, path: str) -> Optional[datetime.datetime]:
+  def get_time_original(self, path: str) -> Optional[datetime.datetime]:
     try:
-      res: Dict[str, Any] = await self.s3.head_object(
-          Bucket=self.original_bucket, Key=path)
+      res = self.s3.head_object(Bucket=self.original_bucket, Key=path)
     except ClientError as e:
-      if is_no_such_key_client_error(e):
+      if is_not_found_client_error(e):
         return None
       raise e
 
     return res['LastModified']
 
-  async def get_time_generated(self, path: str) -> Optional[datetime.datetime]:
+  def get_time_generated(self, path: str) -> Optional[datetime.datetime]:
     try:
-      res: Dict[str, Any] = await self.s3.head_object(
-          Bucket=self.generated_bucket, Key=self.generated_key_prefix + path)
+      res = self.s3.head_object(
+          Bucket=self.generated_bucket,
+          Key=self.generated_key_prefix + '/' + path)
     except ClientError as e:
-      if is_no_such_key_client_error(e):
+      if is_not_found_client_error(e):
         return None
       raise e
 
@@ -186,7 +179,7 @@ class ImgServer:
       t_gen: Optional[datetime.datetime]) -> bool:
     return t_gen is None or t_gen != t_orig
 
-  async def keep_uptodate(
+  def keep_uptodate(
       self,
       path: str,
       t_orig: Optional[datetime.datetime],
@@ -195,7 +188,7 @@ class ImgServer:
     if not self.needs_generation(t_orig, t_gen):
       return
 
-    await self.sqs.send_message(
+    self.sqs.send_message(
         QueueUrl=self.sqs_queue_url,
         MessageBody=json_dump({
             'bucket': self.generated_bucket,
@@ -209,16 +202,13 @@ class ImgServer:
                 'path': path,
             }))
 
-  async def generate_and_respond_with_original(
+  def generate_and_respond_with_original(
       self, path: str, gen_key: str) -> FieldUpdate:
     try:
-      t_gen_task = asyncio.create_task(self.get_time_generated(gen_key))
-      t_orig_task = asyncio.create_task(self.get_time_original(path))
+      t_gen = self.get_time_generated(gen_key)
+      t_orig = self.get_time_original(path)
 
-      t_gen = await t_gen_task
-      t_orig = await t_orig_task
-
-      await self.keep_uptodate(path, t_orig, t_gen)
+      self.keep_uptodate(path, t_orig, t_gen)
 
       return self.as_permanent(FieldUpdate())
     except Exception as e:
@@ -230,20 +220,17 @@ class ImgServer:
           }))
       return self.as_permanent(FieldUpdate())
 
-  async def res_with_generated_or_generate_and_res_with_original(
+  def res_with_generated_or_generate_and_res_with_original(
       self, path: str, gen_key: str) -> FieldUpdate:
     try:
-      t_gen_task = asyncio.create_task(self.get_time_generated(gen_key))
-      t_orig_task = asyncio.create_task(self.get_time_original(path))
-
-      t_gen = await t_gen_task
-      t_orig = await t_orig_task
+      t_gen = self.get_time_generated(gen_key)
+      t_orig = self.get_time_original(path)
 
       if not self.needs_generation(t_orig, t_gen):
         return self.as_permanent(
             self.origin_as_generated(gen_key, FieldUpdate()))
 
-      await self.keep_uptodate(path, t_orig, t_gen)
+      self.keep_uptodate(path, t_orig, t_gen)
 
       return self.as_temporary(FieldUpdate())
     except Exception as e:
@@ -255,9 +242,9 @@ class ImgServer:
           }))
       return self.as_temporary(FieldUpdate())
 
-  async def res_with_original_or_generated(
+  def res_with_original_or_generated(
       self, path: str, gen_key: str) -> FieldUpdate:
-    t_orig = await self.get_time_original(path)
+    t_orig = self.get_time_original(path)
     if t_orig is not None:
       return self.as_permanent(FieldUpdate())
     return self.as_permanent(self.origin_as_generated(gen_key, FieldUpdate()))
@@ -265,33 +252,34 @@ class ImgServer:
   def respond_with_original(self) -> FieldUpdate:
     return self.as_permanent(FieldUpdate())
 
-  async def process(self, path: str, accept_header: str) -> FieldUpdate:
+  def process(self, path: str, accept_header: str) -> FieldUpdate:
     ext = get_normalized_extension(path)
-    gen_key = self.generated_key_prefix + path
+    gen_key = self.generated_key_prefix + '/' + path
 
     if ext in image_exts:
       if self.supports_webp(accept_header):
-        return await self.res_with_generated_or_generate_and_res_with_original(
+        return self.res_with_generated_or_generate_and_res_with_original(
             path, gen_key + '.webp')
       else:
-        return await self.generate_and_respond_with_original(path, gen_key)
+        return self.generate_and_respond_with_original(path, gen_key)
     elif ext in minifiable_exts:
-      return await self.res_with_generated_or_generate_and_res_with_original(
+      return self.res_with_generated_or_generate_and_res_with_original(
           path, gen_key)
     elif ext == '.js.map':
-      return await self.res_with_original_or_generated(path, gen_key)
+      return self.res_with_original_or_generated(path, gen_key)
     else:
       # This condition includes:
       #   '.min.js' and '.min.css'
       return self.respond_with_original()
 
 
-async def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
+def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
   req: Dict[str, Any] = event['Records'][0]['cf']['request']
   accept_header: str = req[HEADERS].get('accept', {'value': ''})['value']
 
-  server = await ImgServer.from_lambda(req)
-  field_update = await server.process(req['uri'], accept_header)
+  server = ImgServer.from_lambda(req)
+  # Remove leading '/'
+  field_update = server.process(req['uri'][1:], accept_header)
 
   if field_update.origin_domain is not None:
     req['origin']['s3']['domainName'] = field_update.origin_domain
@@ -309,4 +297,4 @@ async def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event: Dict[str, Any], _: Any) -> Any:
-  return asyncio.run(lambda_main(event))
+  return lambda_main(event)
