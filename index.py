@@ -3,18 +3,20 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any, Dict, Optional
 
 import boto3
 from botocore.exceptions import ClientError
-from dateutil import parser
+from dateutil import parser, tz
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_sqs.client import SQSClient
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
 TIMESTAMP_METADATA = 'original-timestamp'
 HEADERS = 'headers'
+EXPIRATION = 'Expiration'
 
 image_exts = set([
     '.jpg',
@@ -36,6 +38,16 @@ minifiable_exts = set([
 
 # https://stackoverflow.com/a/11548754/1160341
 logging.getLogger().setLevel(logging.DEBUG)
+
+
+def parse_expiration(s: str) -> Dict[str, str]:
+  pattern = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
+  return {m.group(1): m.group(2) for m in pattern.finditer(s)}
+
+
+def get_now() -> datetime.datetime:
+  # Return timezone-aware datetime
+  return datetime.datetime.now(tz=tz.tzutc())
 
 
 class MyJsonFormatter(JsonFormatter):
@@ -68,6 +80,7 @@ class XParams:
   sqs_queue_url: str
   perm_resp_max_age: int
   temp_resp_max_age: int
+  expiration_margin: int
 
 
 def json_dump(obj: Any) -> str:
@@ -102,6 +115,7 @@ class ImgServer:
       sqs_queue_url: str,
       perm_resp_max_age: int,
       temp_resp_max_age: int,
+      expiration_margin: int,
   ):
     self.log = log
     self.region = region
@@ -114,6 +128,7 @@ class ImgServer:
     self.sqs_queue_url = sqs_queue_url
     self.perm_resp_max_age = perm_resp_max_age
     self.temp_resp_max_age = temp_resp_max_age
+    self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
 
   @classmethod
   def from_lambda(cls, req: Dict[str, Any]) -> 'ImgServer':
@@ -131,6 +146,7 @@ class ImgServer:
     sqs_queue_url: str = req[HEADERS]['x-env-sqs-queue-url']
     perm_resp_max_age: int = int(req[HEADERS]['x-env-perm-resp-max-age'])
     temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
+    expiration_margin: int = int(req[HEADERS]['x-env-expiration-margin'])
 
     server_key = XParams(
         region=region,
@@ -139,7 +155,8 @@ class ImgServer:
         generated_key_prefix=generated_key_prefix,
         sqs_queue_url=sqs_queue_url,
         perm_resp_max_age=perm_resp_max_age,
-        temp_resp_max_age=temp_resp_max_age)
+        temp_resp_max_age=temp_resp_max_age,
+        expiration_margin=expiration_margin)
 
     if server_key not in cls.instances:
       sqs = boto3.client('sqs', region_name=region)
@@ -154,7 +171,8 @@ class ImgServer:
           generated_key_prefix=generated_key_prefix,
           sqs_queue_url=sqs_queue_url,
           perm_resp_max_age=perm_resp_max_age,
-          temp_resp_max_age=temp_resp_max_age)
+          temp_resp_max_age=temp_resp_max_age,
+          expiration_margin=expiration_margin)
 
     return cls.instances[server_key]
 
@@ -175,20 +193,53 @@ class ImgServer:
   def supports_webp(self, accept_header: str) -> bool:
     return 'image/webp' in accept_header
 
-  def get_time_original(self, path: str) -> Optional[datetime.datetime]:
+  def get_time_original(self, key: str) -> Optional[datetime.datetime]:
     try:
-      res = self.s3.head_object(Bucket=self.original_bucket, Key=path)
+      res = self.s3.head_object(Bucket=self.original_bucket, Key=key)
     except ClientError as e:
       if is_not_found_client_error(e):
         return None
       raise e
 
+    # Return timezone-aware datetime
     return res['LastModified']
 
-  def get_time_generated(self, path: str) -> Optional[datetime.datetime]:
+  def object_expired(
+      self,
+      now: datetime.datetime,
+      key: str,
+      expiration: str,
+  ) -> bool:
+    d = parse_expiration(expiration)
+    exp_str = d.get('expiry-date', None)
+    if exp_str is None:
+      self.log.warning(
+          {
+              'message': 'expiry-date not found',
+              'key': key,
+              'expiration': expiration,
+          })
+      return False
+
+    exp = parser.parse(exp_str)
+    return exp < now + self.expiration_margin
+
+  def get_time_generated(
+      self,
+      now: datetime.datetime,
+      key: str,
+  ) -> Optional[datetime.datetime]:
     try:
-      self.log.debug({'genkey': path})
-      res = self.s3.head_object(Bucket=self.generated_bucket, Key=path)
+      res = self.s3.head_object(Bucket=self.generated_bucket, Key=key)
+      if 'Expiration' in res and self.object_expired(now, key,
+                                                     res['Expiration']):
+        self.log.debug(
+            {
+                'message': 'expired object found',
+                'key': key,
+                'expiration': res['Expiration'],
+            })
+        return None
     except ClientError as e:
       if is_not_found_client_error(e):
         return None
@@ -224,11 +275,9 @@ class ImgServer:
   def generate_and_respond_with_original(
       self, path: str, gen_key: str) -> FieldUpdate:
     try:
-      t_gen = self.get_time_generated(gen_key)
+      now = get_now()
+      t_gen = self.get_time_generated(now, gen_key)
       t_orig = self.get_time_original(path)
-
-      self.log.warning(t_gen)
-      self.log.warning(t_orig)
 
       self.keep_uptodate(path, t_orig, t_gen)
 
@@ -236,17 +285,20 @@ class ImgServer:
         return self.as_permanent(FieldUpdate())
       return self.as_temporary(FieldUpdate())
     except Exception as e:
-      self.log.warning({
-          'path': path,
-          'gen_key': gen_key,
-          'error': str(e),
-      })
+      self.log.error(
+          {
+              'message': 'error during generate_and_respond_with_original()',
+              'path': path,
+              'gen_key': gen_key,
+              'error': str(e),
+          })
       return self.as_permanent(FieldUpdate())
 
   def res_with_generated_or_generate_and_res_with_original(
       self, path: str, gen_key: str) -> FieldUpdate:
     try:
-      t_gen = self.get_time_generated(gen_key)
+      now = get_now()
+      t_gen = self.get_time_generated(now, gen_key)
       t_orig = self.get_time_original(path)
 
       self.keep_uptodate(path, t_orig, t_gen)
@@ -256,19 +308,33 @@ class ImgServer:
             self.origin_as_generated(gen_key, FieldUpdate()))
       return self.as_temporary(FieldUpdate())
     except Exception as e:
-      self.log.warning({
-          'path': path,
-          'gen_key': gen_key,
-          'error': str(e),
-      })
+      self.log.error(
+          {
+              'message': (
+                  'error during '
+                  'res_with_generated_or_generate_and_res_with_original()'),
+              'path': path,
+              'gen_key': gen_key,
+              'error': str(e),
+          })
       return self.as_temporary(FieldUpdate())
 
   def res_with_original_or_generated(
       self, path: str, gen_key: str) -> FieldUpdate:
-    t_orig = self.get_time_original(path)
-    if t_orig is not None:
-      return self.as_permanent(FieldUpdate())
-    return self.as_permanent(self.origin_as_generated(gen_key, FieldUpdate()))
+    try:
+      t_orig = self.get_time_original(path)
+      if t_orig is not None:
+        return self.as_permanent(FieldUpdate())
+      return self.as_permanent(self.origin_as_generated(gen_key, FieldUpdate()))
+    except Exception as e:
+      self.log.error(
+          {
+              'message': 'error during res_with_original_or_generated()',
+              'path': path,
+              'gen_key': gen_key,
+              'error': str(e),
+          })
+      return self.as_temporary(FieldUpdate())
 
   def respond_with_original(self) -> FieldUpdate:
     return self.as_permanent(FieldUpdate())

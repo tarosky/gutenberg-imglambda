@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import secrets
-import sys
 import time
 import warnings
 from logging import Logger
@@ -27,14 +26,18 @@ GIF_MIME = "image/gif"
 JPEG_MIME = 'image/jpeg'
 JS_MIME = 'text/javascript'
 PNG_MIME = 'image/png'
-SOURCE_MAP_MIME = 'application/octet-stream'
+SOURCEMAP_MIME = 'application/octet-stream'
 WEBP_MIME = "image/webp"
 
+CSS_NAME = 'style.css'
 JPG_NAME = 'image.jpg'
 JPG_NAME_U = 'image.JPG'
 JPG_WEBP_NAME = 'image.jpg.webp'
 JPG_WEBP_NAME_U = 'image.JPG.webp'
 JS_NAME = 'fizzbuzz.js'
+MIN_CSS_NAME = 'style.min.css'
+MIN_JS_NAME = 'script.min.js'
+SOURCEMAP_NAME = 'script.js.map'
 
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
@@ -56,7 +59,8 @@ def generate_safe_random_string() -> str:
   return secrets.token_urlsafe(256 // 8)
 
 
-def create_img_server(log: Logger, name: str) -> ImgServer:
+def create_img_server(
+    log: Logger, name: str, expiration_margin: int) -> ImgServer:
   account_id = read_test_config('aws-account-id')
   sqs_name = f'test-{name}-{generate_safe_random_string()}'
 
@@ -79,15 +83,20 @@ def create_img_server(log: Logger, name: str) -> ImgServer:
       sqs_queue_url=(
           f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
       perm_resp_max_age=PERM_RESP_MAX_AGE,
-      temp_resp_max_age=TEMP_RESP_MAX_AGE)
+      temp_resp_max_age=TEMP_RESP_MAX_AGE,
+      expiration_margin=expiration_margin)
 
 
 def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
   return sqs_queue_url.split('/')[-1]
 
 
-def create_test_environment(log: Logger, name: str) -> ImgServer:
-  img_server = create_img_server(log, name)
+def create_test_environment(
+    log: Logger,
+    name: str,
+    expiration_margin: int,
+) -> ImgServer:
+  img_server = create_img_server(log, name, expiration_margin)
   img_server.sqs.create_queue(
       QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
   return img_server
@@ -176,7 +185,11 @@ class BaseTestCase(TestCase):
     log_handler.setStream(self._log_file)
     self._log.addHandler(log_handler)
 
-    self._img_server = create_test_environment(self._log, 'imglambda')
+    self._img_server = create_test_environment(
+        self._log, 'imglambda', self.get_expiration_margin())
+
+  def get_expiration_margin(self) -> int:
+    return 10
 
   def put_original(self, name: str, mime: str) -> datetime.datetime:
     return put_original(
@@ -187,7 +200,6 @@ class BaseTestCase(TestCase):
       timestamp: Optional[datetime.datetime]) -> None:
     key = f'{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
 
-    self._log.debug({'testgen': key})
     put_generated(self._img_server, key, name, mime, timestamp)
 
   def receive_sqs_message(self) -> Optional[Dict[str, str]]:
@@ -207,10 +219,22 @@ class BaseTestCase(TestCase):
     clean_test_environment(self._img_server)
 
 
-class ImgserveTestCase(BaseTestCase):
+class ImgserverExpiredTestCase(BaseTestCase):
 
-  def setUp(self) -> None:
-    super().setUp()
+  def get_expiration_margin(self) -> int:
+    return 60 * 60 * 24 * 2
+
+  def test_jpg_accepted_gen_orig(self) -> None:
+    ts = self.put_original(JPG_NAME, JPEG_MIME)
+    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+
+    path = f'{self._key_prefix}{JPG_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_sqs_message(path)
+
+
+class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGAcceptedS3EFS_L
   def test_jpg_accepted_gen_orig_l(self) -> None:
@@ -419,364 +443,189 @@ class ImgserveTestCase(BaseTestCase):
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
+  # Test_JSS3EFSOld
+  def test_js_gen_orig_old(self) -> None:
+    ts = self.put_original(JS_NAME, JS_MIME)
+    self.put_generated(JS_NAME, JS_MIME, ts + datetime.timedelta(1))
+
+    path = f'{self._key_prefix}{JS_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_sqs_message(path)
+
+  # Test_CSSS3EFS
+  def test_css_gen_orig(self) -> None:
+    ts = self.put_original(CSS_NAME, CSS_MIME)
+    self.put_generated(CSS_NAME, CSS_MIME, ts)
+
+    path = f'{self._key_prefix}{CSS_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+        ), update)
+    self.assert_no_sqs_message()
+
+  # Test_CSSS3NoEFS
+  def test_css_gen_no_orig(self) -> None:
+    self.put_generated(CSS_NAME, CSS_MIME, DUMMY_DATETIME)
+
+    path = f'{self._key_prefix}{CSS_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_sqs_message(path)
+
+  # Test_CSSNoS3EFS
+  def test_css_no_gen_orig(self) -> None:
+    self.put_original(CSS_NAME, CSS_MIME)
+
+    path = f'{self._key_prefix}{CSS_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_sqs_message(path)
+
+  # Test_CSSNoS3NoEFS
+  def test_css_no_gen_no_orig(self) -> None:
+    path = f'{self._key_prefix}{CSS_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_no_sqs_message()
+
+  # Test_CSSS3EFSOld
+  def test_css_gen_orig_old(self) -> None:
+    ts = self.put_original(CSS_NAME, CSS_MIME)
+    self.put_generated(CSS_NAME, CSS_MIME, ts + datetime.timedelta(1))
+
+    path = f'{self._key_prefix}{CSS_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_sqs_message(path)
+
+  # Test_SourceMapS3EFS
+  def test_sourcemap_gen_orig(self) -> None:
+    ts = self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
+    self.put_generated(SOURCEMAP_NAME, SOURCEMAP_MIME, ts)
+
+    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
+
+  # Test_SourceMapS3NoEFS
+  def test_sourcemap_gen_no_orig(self) -> None:
+    self.put_generated(SOURCEMAP_NAME, SOURCEMAP_MIME, DUMMY_DATETIME)
+
+    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+        ), update)
+    self.assert_no_sqs_message()
+
+  # Test_SourceMapNoS3EFS
+  def test_sourcemap_no_gen_orig(self) -> None:
+    self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
+
+    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
+
+  # Test_SourceMapNoS3NoEFS
+  def test_sourcemap_no_gen_no_orig(self) -> None:
+    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+        ), update)
+    self.assert_no_sqs_message()
+
+  def test_sourcemap_gen_orig_old(self) -> None:
+    ts = self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
+    self.put_generated(
+        SOURCEMAP_NAME, SOURCEMAP_MIME, ts + datetime.timedelta(1))
+
+    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
+
+  # Test_MinJSS3EFS
+  def test_min_js_gen_orig(self) -> None:
+    self.file_gen_orig(MIN_JS_NAME, JS_MIME)
+
+  # Test_MinCSSS3EFS
+  def test_min_css_gen_orig(self) -> None:
+    self.file_gen_orig(MIN_CSS_NAME, CSS_MIME)
+
+  # FileS3EFS
+  def file_gen_orig(self, name: str, mime: str) -> None:
+    ts = self.put_original(name, mime)
+    self.put_generated(name, mime, ts)
+
+    path = f'{self._key_prefix}{name}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
+
+  # Test_MinJSS3NoEFS
+  def test_min_js_gen_no_orig(self) -> None:
+    self.file_gen_no_orig(MIN_JS_NAME, JS_MIME)
+
+  # Test_MinCSSS3NoEFS
+  def test_min_css_gen_no_orig(self) -> None:
+    self.file_gen_no_orig(MIN_CSS_NAME, CSS_MIME)
+
+  # FileS3NoEFS
+  def file_gen_no_orig(self, name: str, mime: str) -> None:
+    self.put_generated(name, mime, DUMMY_DATETIME)
+
+    path = f'{self._key_prefix}{name}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
+
+  # Test_MinJSNoS3EFS
+  def test_min_js_no_gen_orig(self) -> None:
+    self.file_no_gen_orig(MIN_JS_NAME, JS_MIME)
+
+  # Test_MinCSSNoS3EFS
+  def test_min_css_no_gen_orig(self) -> None:
+    self.file_no_gen_orig(MIN_CSS_NAME, CSS_MIME)
+
+  # FileNoS3EFS
+  def file_no_gen_orig(self, name: str, mime: str) -> None:
+    self.put_original(name, mime)
+
+    path = f'{self._key_prefix}{name}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
+
+  # Test_MinJSNoS3NoEFS
+  def test_min_js_no_gen_no_orig(self) -> None:
+    self.file_no_gen_no_orig(MIN_JS_NAME, JS_MIME)
+
+  # Test_MinCSSNoS3NoEFS
+  def test_min_css_no_gen_no_orig(self) -> None:
+    self.file_no_gen_no_orig(MIN_CSS_NAME, CSS_MIME)
+
+  # FileNoS3NoEFS
+  def file_no_gen_no_orig(self, name: str, mime: str) -> None:
+    path = f'{self._key_prefix}{name}'
+    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assert_no_sqs_message()
 
-# func (s *ImgServerSuite) Test_JSS3EFSOld() {
-# 	s.uploadFileToS3Dest(s.ctx, jsPathL, toWebPPath(jsPathL), sampleMinJS, &oldModTime)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+jsPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(jsMIME, header.contentType())
-# 		s.Assert().Equal(sampleJSSize, res.ContentLength)
-# 		s.Assert().Equal(sampleJSETag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		// Send message to update S3 object
-# 		s.assertDelayedSQSMessage(ctx, jsPathL)
-# 		s.assertS3SrcExists(ctx, jsPathL, &sampleModTime, jsMIME, sampleJSSize)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_CSSS3EFS() {
-# 	eTag := s.uploadFileToS3Dest(s.ctx, cssPathL, cssPathL, sampleMinCSS, nil)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+cssPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.permanentCache.value, header.cacheControl())
-# 		s.Assert().Equal(cssMIME, header.contentType())
-# 		s.Assert().Equal(sampleMinCSSSize, res.ContentLength)
-# 		s.Assert().Equal(eTag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, cssPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_CSSS3NoEFS() {
-# 	const longTextLen = int64(1024)
-
-# 	s.uploadFileToS3Dest(s.ctx, cssPathL, cssPathL, sampleMinCSS, nil)
-# 	s.uploadFileToS3Src(s.ctx, cssPathL, cssPathL, sampleCSS, nil)
-# 	s.Require().NoError(os.Remove(s.env.efsMountPath + "/" + cssPathL))
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+cssPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusNotFound, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(plainContentType, header.contentType())
-# 		s.Assert().Greater(longTextLen, res.ContentLength)
-# 		s.Assert().Equal("", header.eTag())
-# 		s.Assert().Equal("", header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertDelayedSQSMessage(ctx, cssPathL)
-# 		// Ensure source file on S3 is also removed
-# 		s.assertS3SrcNotExists(ctx, cssPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_CSSNoS3EFS() {
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+cssPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(cssMIME, header.contentType())
-# 		s.Assert().Equal(sampleCSSSize, res.ContentLength)
-# 		s.Assert().Equal(sampleCSSETag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertDelayedSQSMessage(ctx, cssPathL)
-# 		s.assertS3SrcExists(ctx, cssPathL, &sampleModTime, cssMIME, sampleCSSSize)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_CSSNoS3NoEFS() {
-# 	const longTextLen = int64(1024)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+cssNonExistentPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusNotFound, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(plainContentType, header.contentType())
-# 		s.Assert().Greater(longTextLen, res.ContentLength)
-# 		s.Assert().Equal("", header.eTag())
-# 		s.Assert().Equal("", header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, cssNonExistentPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_CSSS3EFSOld() {
-# 	s.uploadFileToS3Dest(s.ctx, cssPathL, toWebPPath(cssPathL), sampleMinCSS, &oldModTime)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+cssPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(cssMIME, header.contentType())
-# 		s.Assert().Equal(sampleCSSSize, res.ContentLength)
-# 		s.Assert().Equal(sampleCSSETag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		// Send message to update S3 object
-# 		s.assertDelayedSQSMessage(ctx, cssPathL)
-# 		s.assertS3SrcExists(ctx, cssPathL, &sampleModTime, cssMIME, sampleCSSSize)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_SourceMapS3EFS() {
-# 	s.uploadFileToS3Dest(s.ctx, sourceMapPathL, sourceMapPathL, sampleSourceMap, nil)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+sourceMapPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.permanentCache.value, header.cacheControl())
-# 		s.Assert().Equal(sourceMapMIME, header.contentType())
-# 		s.Assert().Equal(sampleSourceMap2Size, res.ContentLength)
-# 		s.Assert().Equal(sampleSourceMap2ETag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, sourceMapPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_SourceMapS3NoEFS() {
-# 	const longTextLen = int64(1024)
-
-# 	eTag := s.uploadFileToS3Dest(s.ctx, sourceMapPathL, sourceMapPathL, sampleSourceMap, nil)
-# 	s.Require().NoError(os.Remove(s.env.efsMountPath + "/" + sourceMapPathL))
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+sourceMapPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.permanentCache.value, header.cacheControl())
-# 		s.Assert().Equal(sourceMapMIME, header.contentType())
-# 		s.Assert().Equal(sampleSourceMapSize, res.ContentLength)
-# 		s.Assert().Equal(eTag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, sourceMapPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_SourceMapNoS3EFS() {
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+sourceMapPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.permanentCache.value, header.cacheControl())
-# 		s.Assert().Equal(sourceMapMIME, header.contentType())
-# 		s.Assert().Equal(sampleSourceMap2Size, res.ContentLength)
-# 		s.Assert().Equal(sampleSourceMap2ETag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, sourceMapPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_SourceMapNoS3NoEFS() {
-# 	const longTextLen = int64(1024)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+sourceMapNonExistentPathL, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusNotFound, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(plainContentType, header.contentType())
-# 		s.Assert().Greater(longTextLen, res.ContentLength)
-# 		s.Assert().Equal("", header.eTag())
-# 		s.Assert().Equal("", header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, sourceMapNonExistentPathL)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_MinJSS3EFS() {
-# 	s.FileS3EFS(minJSPathL, jsMIME, sampleMinJSSize, sampleMinJSETag)
-# }
-
-# func (s *ImgServerSuite) Test_MinCSSS3EFS() {
-# 	s.FileS3EFS(minCSSPathL, cssMIME, sampleMinCSSSize, sampleMinCSSETag)
-# }
-
-# func (s *ImgServerSuite) FileS3EFS(
-# 	path string,
-# 	contentType string,
-# 	size int64,
-# 	eTag string,
-# ) {
-# 	s.uploadFileToS3Dest(s.ctx, path, path, sampleSourceMap, nil)
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+path, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.permanentCache.value, header.cacheControl())
-# 		s.Assert().Equal(contentType, header.contentType())
-# 		s.Assert().Equal(size, res.ContentLength)
-# 		s.Assert().Equal(eTag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, path)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_MinJSS3NoEFS() {
-# 	s.FileS3NoEFS(minJSPathL)
-# }
-
-# func (s *ImgServerSuite) Test_MinCSSS3NoEFS() {
-# 	s.FileS3NoEFS(minCSSPathL)
-# }
-
-# func (s *ImgServerSuite) FileS3NoEFS(path string) {
-# 	const longTextLen = int64(1024)
-
-# 	s.uploadFileToS3Dest(s.ctx, path, path, sampleSourceMap, nil)
-# 	s.Require().NoError(os.Remove(s.env.efsMountPath + "/" + path))
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+path, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusNotFound, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(plainContentType, header.contentType())
-# 		s.Assert().Greater(longTextLen, res.ContentLength)
-# 		s.Assert().Equal("", header.eTag())
-# 		s.Assert().Equal("", header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, path)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_MinJSNoS3EFS() {
-# 	s.FileS3EFS(minJSPathL, jsMIME, sampleMinJSSize, sampleMinJSETag)
-# }
-
-# func (s *ImgServerSuite) Test_MinCSSNoS3EFS() {
-# 	s.FileS3EFS(minCSSPathL, cssMIME, sampleMinCSSSize, sampleMinCSSETag)
-# }
-
-# func (s *ImgServerSuite) FileNoS3EFS(
-# 	path string,
-# 	contentType string,
-# 	size int64,
-# 	eTag string,
-# ) {
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+path, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusOK, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.permanentCache.value, header.cacheControl())
-# 		s.Assert().Equal(contentType, header.contentType())
-# 		s.Assert().Equal(size, res.ContentLength)
-# 		s.Assert().Equal(eTag, header.eTag())
-# 		s.Assert().Equal(sampleLastModified, header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, path)
-# 	})
-# }
-
-# func (s *ImgServerSuite) Test_MinJSNoS3NoEFS() {
-# 	s.FileNoS3NoEFS(minJSPathL)
-# }
-
-# func (s *ImgServerSuite) Test_MinCSSNoS3NoEFS() {
-# 	s.FileNoS3NoEFS(minCSSPathL)
-# }
-
-# func (s *ImgServerSuite) FileNoS3NoEFS(path string) {
-# 	const longTextLen = int64(1024)
-
-# 	s.Require().NoError(os.Remove(s.env.efsMountPath + "/" + path))
-
-# 	s.serve(func(ctx context.Context, ts *httptest.Server) {
-# 		res := s.request(ctx, ts, "/"+path, chromeAcceptHeader)
-
-# 		header := httpHeader(*res)
-# 		s.Assert().Equal(http.StatusNotFound, res.StatusCode)
-# 		s.Assert().Equal(s.env.configure.temporaryCache.value, header.cacheControl())
-# 		s.Assert().Equal(plainContentType, header.contentType())
-# 		s.Assert().Greater(longTextLen, res.ContentLength)
-# 		s.Assert().Equal("", header.eTag())
-# 		s.Assert().Equal("", header.lastModified())
-# 		body, err := ioutil.ReadAll(res.Body)
-# 		s.Assert().NoError(err)
-# 		s.Assert().Len(body, int(res.ContentLength))
-# 		s.assertNoSQSMessage(ctx)
-# 		s.assertS3SrcNotExists(ctx, path)
-# 	})
-# }
+
 if 'unittest.util' in __import__('sys').modules:
   # Show full diff in self.assertEqual.
   __import__('sys').modules['unittest.util']._MAX_LENGTH = 999999999
