@@ -14,7 +14,7 @@ import boto3
 import pytz
 from mypy_boto3_sqs.type_defs import MessageTypeDef
 
-from index import TIMESTAMP_METADATA, FieldUpdate, ImgServer, MyJsonFormatter
+from .index import TIMESTAMP_METADATA, FieldUpdate, ImgServer, MyJsonFormatter
 
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
 TEMP_RESP_MAX_AGE = 20 * 60

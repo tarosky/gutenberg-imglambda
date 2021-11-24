@@ -1,0 +1,8 @@
+boto3==1.20.8
+mypy_boto3_s3==1.20.1
+mypy_boto3_sqs==1.20.1
+python-dateutil==2.8.2
+python-json-logger==2.0.2
+pytz==2021.3
+types-python-dateutil==2.8.2
+types-pytz==2021.3.0
