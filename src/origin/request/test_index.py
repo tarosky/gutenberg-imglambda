@@ -67,8 +67,9 @@ def create_img_server(
   sess = boto3.Session(
       aws_access_key_id=read_test_config('access-key-id'),
       aws_secret_access_key=read_test_config('secret-access-key'))
+  # https://github.com/boto/boto3/issues/454#issuecomment-380900404
   warnings.filterwarnings(
-      "ignore", category=ResourceWarning, message="unclosed.*<ssl.SSLSocket.*>")
+      'ignore', category=ResourceWarning, message='unclosed.*<ssl.SSLSocket.*>')
   sqs = sess.client('sqs', region_name=REGION)
   s3 = sess.client('s3', region_name=REGION)
 

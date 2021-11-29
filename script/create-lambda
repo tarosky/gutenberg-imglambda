@@ -1,0 +1,28 @@
+#!/bin/bash -eu
+
+package_lambda () {
+  local -r side="$1"
+  local -r flow="$2"
+  local -r cwd="$(pwd)"
+  local -r src="$cwd/src/$side/$flow"
+  local -r dest="$cwd/work/$side/$flow"
+  local -r zip="$cwd/work/$side-$flow.zip"
+
+  rm -fr "$zip"
+  mkdir -p "$dest"
+  rsync -r --delete --exclude=__pycache__ \
+    "$src/.venv/lib/python3.9/site-packages/" "$dest"
+  cp "$src/index.py" "$dest"
+  touch "$dest/__init__.py"
+
+  # cd "$dest"
+  # digest="$(find . -type f -exec md5sum {} \; | sort -k 2 | md5sum | cut -f1 -d' ')"
+  # cd "$cwd"
+
+  cd "$dest"
+  zip -q -r "$zip" .
+  cd "$cwd"
+}
+
+package_lambda origin request
+package_lambda origin response

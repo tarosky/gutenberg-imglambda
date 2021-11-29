@@ -17,6 +17,7 @@ from pythonjsonlogger.jsonlogger import JsonFormatter
 TIMESTAMP_METADATA = 'original-timestamp'
 HEADERS = 'headers'
 EXPIRATION = 'Expiration'
+MESSAGE = 'message'
 
 image_exts = set([
     '.jpg',
@@ -131,7 +132,7 @@ class ImgServer:
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
 
   @classmethod
-  def from_lambda(cls, req: Dict[str, Any]) -> 'ImgServer':
+  def from_lambda(cls, req: Dict[str, Any]) -> Optional['ImgServer']:
     log = logging.getLogger(__name__)
     log_handler = logging.StreamHandler()
     log_handler.setFormatter(MyJsonFormatter())
@@ -139,14 +140,21 @@ class ImgServer:
     log_handler.setStream(sys.stderr)
     log.addHandler(log_handler)
 
-    region: str = req[HEADERS]['x-env-region']
-    generated_domain: str = req[HEADERS]['x-env-generated-domain']
-    original_bucket: str = req['origin']['s3']['domainName'].split('.', 1)[0]
-    generated_key_prefix: str = req[HEADERS]['x-env-generated-key-prefix']
-    sqs_queue_url: str = req[HEADERS]['x-env-sqs-queue-url']
-    perm_resp_max_age: int = int(req[HEADERS]['x-env-perm-resp-max-age'])
-    temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
-    expiration_margin: int = int(req[HEADERS]['x-env-expiration-margin'])
+    try:
+      region: str = req[HEADERS]['x-env-region']
+      generated_domain: str = req[HEADERS]['x-env-generated-domain']
+      original_bucket: str = req['origin']['s3']['domainName'].split('.', 1)[0]
+      generated_key_prefix: str = req[HEADERS]['x-env-generated-key-prefix']
+      sqs_queue_url: str = req[HEADERS]['x-env-sqs-queue-url']
+      perm_resp_max_age: int = int(req[HEADERS]['x-env-perm-resp-max-age'])
+      temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
+      expiration_margin: int = int(req[HEADERS]['x-env-expiration-margin'])
+    except KeyError as e:
+      log.warning({
+          MESSAGE: 'environment variable not found',
+          'key': str(e),
+      })
+      return None
 
     server_key = XParams(
         region=region,
@@ -215,7 +223,7 @@ class ImgServer:
     if exp_str is None:
       self.log.warning(
           {
-              'message': 'expiry-date not found',
+              MESSAGE: 'expiry-date not found',
               'key': key,
               'expiration': expiration,
           })
@@ -235,7 +243,7 @@ class ImgServer:
                                                      res['Expiration']):
         self.log.debug(
             {
-                'message': 'expired object found',
+                MESSAGE: 'expired object found',
                 'key': key,
                 'expiration': res['Expiration'],
             })
@@ -267,7 +275,7 @@ class ImgServer:
         }))
     self.log.debug(
         {
-            'message': 'enqueued',
+            MESSAGE: 'enqueued',
             'bucket': self.original_bucket,
             'path': path,
         })
@@ -287,7 +295,7 @@ class ImgServer:
     except Exception as e:
       self.log.error(
           {
-              'message': 'error during generate_and_respond_with_original()',
+              MESSAGE: 'error during generate_and_respond_with_original()',
               'path': path,
               'gen_key': gen_key,
               'error': str(e),
@@ -310,7 +318,7 @@ class ImgServer:
     except Exception as e:
       self.log.error(
           {
-              'message': (
+              MESSAGE: (
                   'error during '
                   'res_with_generated_or_generate_and_res_with_original()'),
               'path': path,
@@ -329,7 +337,7 @@ class ImgServer:
     except Exception as e:
       self.log.error(
           {
-              'message': 'error during res_with_original_or_generated()',
+              MESSAGE: 'error during res_with_original_or_generated()',
               'path': path,
               'gen_key': gen_key,
               'error': str(e),
@@ -366,6 +374,9 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
   accept_header: str = req[HEADERS].get('accept', {'value': ''})['value']
 
   server = ImgServer.from_lambda(req)
+  if server is None:
+    return req
+
   # Remove leading '/'
   field_update = server.process(req['uri'][1:], accept_header)
 
@@ -377,7 +388,6 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
 
   if field_update.res_cache_control is not None:
     req[HEADERS]['x-res-cache-control'] = {
-        'key': 'X-Res-Cache-Control',
         'value': field_update.res_cache_control,
     }
 

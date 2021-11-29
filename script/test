@@ -1,3 +1,19 @@
-#!/bin/bash
+#!/bin/bash -eu
 
-exec python -m unittest -v
+path="$1"
+
+abs="$(realpath "$path")"
+dir="$(dirname $abs)"
+file="$(basename $path)"
+if [[ "$file" == test_* ]]; then
+  test="$dir/$file"
+else
+  test="$dir/test_$file"
+fi
+
+if [ ! -e "$test" ]; then
+  exit 0
+fi
+
+echo "Tests running: $test"
+exec python -m unittest -v "$test"
