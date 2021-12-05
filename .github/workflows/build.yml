@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+    - master
+  push:
+    branches:
+    - master
+    - issue/*
+    # - dev/harai
+
+env:
+  AWS_ACCOUNT_ID: '013230744746'
+  ACCESS_KEY_ID: AKIAQGFE5ESVHZJABI5A
+  S3_BUCKET: gutenberg-ext-imglambda-repobucket-4lm50jwpoc3u
+  TEST_ACCESS_KEY_ID: AKIAQGFE5ESVB2AZXASN
+  TEST_S3_BUCKET: gutenberg-ext-imglambda-tests3bucket-1lqijrwmwxc0t
+  PYTHON_VERSION: 3.9.8
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-python@v2
+      with:
+        python-version: '^${{env.PYTHON_VERSION}}'
+    - run: script/recreate-venv
+    - run: script/create-lambda
+    - uses: actions/upload-artifact@v2
+      with:
+        name: artifact
+        path: |
+          work/origin-request.zip
+          work/origin-response.zip
+
+  test:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/download-artifact@v2
+      with:
+        name: artifact
+        path: work
+    - uses: actions/setup-python@v2
+      with:
+        python-version: '^${{env.PYTHON_VERSION}}'
+    - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
+    - run: echo "$AWS_ACCOUNT_ID" > config/test/aws-account-id
+    - run: echo "$TEST_S3_BUCKET" > config/test/s3-bucket
+    - run: echo "$TEST_AWS_SECRET_ACCESS_KEY" > config/test/secret-access-key
+      env:
+        TEST_AWS_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
+    - run: pip install -r requirements.txt
+    - run: python -m xmlrunner --output-file work/report.xml src/origin/request/test_index.py 2>&1
+    - name: Publish Unit Test Results
+      uses: EnricoMi/publish-unit-test-result-action@v1
+      if: always()
+      with:
+        github_token: ${{secrets.GITHUB_TOKEN}}
+        files: work/report.xml
+
+  release:
+    needs:
+    - build
+    - test
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/download-artifact@v2
+      with:
+        name: artifact
+    - name: Generate build number
+      uses: einaregilsson/build-number@v3
+      with:
+        token: ${{secrets.GITHUB_TOKEN}}
+        prefix: build_number_generator
+    - name: Print new build number
+      run: echo "Build number is $BUILD_NUMBER"
+    - id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      with:
+        tag_name: build-${{env.BUILD_NUMBER}}
+        release_name: Build ${{env.BUILD_NUMBER}}
+        draft: false
+        prerelease: false
+    - uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      with:
+        upload_url: ${{steps.create_release.outputs.upload_url}}
+        asset_path: ./origin-request.zip
+        asset_name: origin-request.build-$BUILD_NUMBER-awslambda-python3.9.zip
+        asset_content_type: application/octet-stream
+    - uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      with:
+        upload_url: ${{steps.create_release.outputs.upload_url}}
+        asset_path: ./origin-response.zip
+        asset_name: origin-response.build-$BUILD_NUMBER-awslambda-python3.9.zip
+        asset_content_type: application/octet-stream
+    - uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{env.ACCESS_KEY_ID}}
+        aws-secret-access-key: ${{secrets.AWS_SECRET_ACCESS_KEY}}
+        aws-region: ap-northeast-1
+    - run: aws s3 cp ./origin-request.zip s3://${{env.S3_BUCKET}}/origin-request.build-$BUILD_NUMBER-awslambda-python3.9.zip
+    - run: aws s3 cp ./origin-response.zip s3://${{env.S3_BUCKET}}/origin-response.build-$BUILD_NUMBER-awslambda-python3.9.zip

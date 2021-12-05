@@ -12,4 +12,5 @@ python-json-logger==2.0.2
 pytz==2021.3
 types-python-dateutil==2.8.2
 types-pytz==2021.3.0
+unittest-xml-reporting==3.0.2
 yapf==0.31.0
