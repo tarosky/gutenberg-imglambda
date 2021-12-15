@@ -12,10 +12,11 @@ on:
 
 env:
   AWS_ACCOUNT_ID: '013230744746'
-  ACCESS_KEY_ID: AKIAQGFE5ESVHZJABI5A
-  S3_BUCKET: gutenberg-ext-imglambda-repobucket-4lm50jwpoc3u
-  TEST_ACCESS_KEY_ID: AKIAQGFE5ESVB2AZXASN
-  TEST_S3_BUCKET: gutenberg-ext-imglambda-tests3bucket-1lqijrwmwxc0t
+  RELEASE_ACCESS_KEY_ID: AKIAQGFE5ESVJ7IYEUVR
+  REPO_BUCKET: gutenberg-ext-imglambda-repobucket-1i58nyytyztdl
+  TEST_ACCESS_KEY_ID: AKIAQGFE5ESVKGVB3XGS
+  TEST_GENERATED_BUCKET: gutenberg-ext-imglambda-testgeneratedbucket-n8c79jl0mzd2
+  TEST_ORIGINAL_BUCKET: gutenberg-ext-imglambda-testoriginalbucket-fz28m8cblu5t
   PYTHON_VERSION: 3.9.8
 
 jobs:
@@ -48,10 +49,11 @@ jobs:
         python-version: '^${{env.PYTHON_VERSION}}'
     - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
     - run: echo "$AWS_ACCOUNT_ID" > config/test/aws-account-id
-    - run: echo "$TEST_S3_BUCKET" > config/test/s3-bucket
-    - run: echo "$TEST_AWS_SECRET_ACCESS_KEY" > config/test/secret-access-key
+    - run: echo "$TEST_GENERATED_BUCKET" > config/test/generated-bucket
+    - run: echo "$TEST_ORIGINAL_BUCKET" > config/test/original-bucket
+    - run: echo "$TEST_SECRET_ACCESS_KEY" > config/test/secret-access-key
       env:
-        TEST_AWS_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
+        TEST_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
     - run: pip install -r requirements.txt
     - run: python -m xmlrunner --output-file work/report.xml src/origin/request/test_index.py 2>&1
     - name: Publish Unit Test Results
@@ -105,8 +107,8 @@ jobs:
         asset_content_type: application/octet-stream
     - uses: aws-actions/configure-aws-credentials@v1
       with:
-        aws-access-key-id: ${{env.ACCESS_KEY_ID}}
-        aws-secret-access-key: ${{secrets.AWS_SECRET_ACCESS_KEY}}
-        aws-region: ap-northeast-1
-    - run: aws s3 cp ./origin-request.zip s3://${{env.S3_BUCKET}}/origin-request.build-$BUILD_NUMBER-awslambda-python3.9.zip
-    - run: aws s3 cp ./origin-response.zip s3://${{env.S3_BUCKET}}/origin-response.build-$BUILD_NUMBER-awslambda-python3.9.zip
+        aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
+        aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
+        aws-region: us-east-1
+    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-$BUILD_NUMBER-awslambda-python3.9.zip
+    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-$BUILD_NUMBER-awslambda-python3.9.zip

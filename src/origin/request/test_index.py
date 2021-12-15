@@ -19,7 +19,7 @@ from .index import TIMESTAMP_METADATA, FieldUpdate, ImgServer, MyJsonFormatter
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
 TEMP_RESP_MAX_AGE = 20 * 60
 GENERATED_KEY_PREFIX = 'prefix/'
-REGION = 'ap-northeast-1'
+REGION = 'us-east-1'
 
 CSS_MIME = 'text/css'
 GIF_MIME = "image/gif"
@@ -78,8 +78,8 @@ def create_img_server(
       region=REGION,
       sqs=sqs,
       s3=s3,
-      generated_domain=f"{read_test_config('s3-bucket')}.s3.example.com",
-      original_bucket=read_test_config('public-content-bucket'),
+      generated_domain=f"{read_test_config('generated-bucket')}.s3.example.com",
+      original_bucket=read_test_config('original-bucket'),
       generated_key_prefix=GENERATED_KEY_PREFIX,
       sqs_queue_url=(
           f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
