@@ -57,10 +57,6 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
     - uses: actions/checkout@v2
-    - uses: actions/download-artifact@v2
-      with:
-        name: artifact
-        path: work
     - uses: actions/setup-python@v2
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
