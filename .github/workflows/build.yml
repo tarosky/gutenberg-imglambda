@@ -26,7 +26,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions/setup-python@v2
       with:
-        python-version: '^${{env.PYTHON_VERSION}}'
+        python-version: '~${{env.PYTHON_VERSION}}'
     - run: script/recreate-venv
     - name: Generate build number
       uses: einaregilsson/build-number@v3
@@ -63,7 +63,7 @@ jobs:
         path: work
     - uses: actions/setup-python@v2
       with:
-        python-version: '^${{env.PYTHON_VERSION}}'
+        python-version: '~${{env.PYTHON_VERSION}}'
     - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
     - run: echo "$AWS_ACCOUNT_ID" > config/test/aws-account-id
     - run: echo "$TEST_GENERATED_BUCKET" > config/test/generated-bucket
