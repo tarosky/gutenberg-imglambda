@@ -28,6 +28,19 @@ jobs:
       with:
         python-version: '^${{env.PYTHON_VERSION}}'
     - run: script/recreate-venv
+    - name: Generate build number
+      uses: einaregilsson/build-number@v3
+      with:
+        token: ${{secrets.GITHUB_TOKEN}}
+        prefix: build_number_generator
+    - name: Print new build number
+      run: echo "Build number is $BUILD_NUMBER"
+    - name: Save the build number
+      run: echo "$BUILD_NUMBER" > work/BUILD_NUMBER
+    - name: Embed build number into code
+      run: echo "build-$BUILD_NUMBER" > src/origin/request/VERSION
+    - name: Embed build number into code
+      run: echo "build-$BUILD_NUMBER" > src/origin/response/VERSION
     - run: script/create-lambda
     - uses: actions/upload-artifact@v2
       with:
@@ -35,6 +48,10 @@ jobs:
         path: |
           work/origin-request.zip
           work/origin-response.zip
+    - uses: actions/upload-artifact@v2
+      with:
+        name: build-number
+        path: work/BUILD_NUMBER
 
   test:
     runs-on: ubuntu-20.04
@@ -73,13 +90,11 @@ jobs:
     - uses: actions/download-artifact@v2
       with:
         name: artifact
-    - name: Generate build number
-      uses: einaregilsson/build-number@v3
+    - uses: actions/download-artifact@v2
       with:
-        token: ${{secrets.GITHUB_TOKEN}}
-        prefix: build_number_generator
-    - name: Print new build number
-      run: echo "Build number is $BUILD_NUMBER"
+        name: build-number
+    - name: set BUILD_NUMBER
+      run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
     - id: create_release
       uses: actions/create-release@v1
       env:

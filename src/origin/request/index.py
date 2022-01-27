@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import sys
+from logging import Logger
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import boto3
@@ -18,6 +20,9 @@ TIMESTAMP_METADATA = 'original-timestamp'
 HEADERS = 'headers'
 EXPIRATION = 'Expiration'
 MESSAGE = 'message'
+VALUE = 'value'
+
+LAMBDA_EXPIRATION_MARGIN = 60
 
 image_exts = set([
     '.jpg',
@@ -37,13 +42,12 @@ minifiable_exts = set([
     '.js',
 ])
 
-# https://stackoverflow.com/a/11548754/1160341
-logging.getLogger().setLevel(logging.DEBUG)
+
+def get_version() -> str:
+  return Path(__file__).resolve().with_name('VERSION').read_text().strip()
 
 
-def parse_expiration(s: str) -> Dict[str, str]:
-  pattern = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
-  return {m.group(1): m.group(2) for m in pattern.finditer(s)}
+version = get_version()
 
 
 def get_now() -> datetime.datetime:
@@ -62,17 +66,48 @@ class MyJsonFormatter(JsonFormatter):
     else:
       log_record['level'] = record.levelname
 
+    log_record['version'] = version
+
     super().add_fields(log_record, record, message_dict)
+
+
+def init_logging() -> Logger:
+  # https://stackoverflow.com/a/11548754/1160341
+  logger = logging.getLogger()
+  logger.setLevel(logging.DEBUG)
+  for h in logger.handlers:
+    logger.removeHandler(h)
+
+  logging.getLogger('botocore').setLevel(logging.WARNING)
+  logging.getLogger('urllib3').setLevel(logging.INFO)
+
+  log = logging.getLogger(__name__)
+  log_handler = logging.StreamHandler()
+  log_handler.setFormatter(MyJsonFormatter())
+  log_handler.setLevel(logging.DEBUG)
+  log_handler.setStream(sys.stderr)
+  log.addHandler(log_handler)
+  log.propagate = False
+
+  return log
+
+
+logger = init_logging()
+
+
+def parse_expiration(s: str) -> Dict[str, str]:
+  pattern = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
+  return {m.group(1): m.group(2) for m in pattern.finditer(s)}
 
 
 @dataclasses.dataclass
 class FieldUpdate:
   res_cache_control: Optional[str] = None
   origin_domain: Optional[str] = None
-  origin_path: Optional[str] = None
+  uri: Optional[str] = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=True, frozen=True)
 class XParams:
   region: str
   generated_domain: str
@@ -90,6 +125,10 @@ def json_dump(obj: Any) -> str:
 
 def is_not_found_client_error(exception: ClientError) -> bool:
   return exception.response['Error']['Code'] == '404'
+
+
+def get_header(req: Dict[str, Any], name: str) -> str:
+  return req['origin']['s3']['customHeaders'][name][0][VALUE]
 
 
 def get_normalized_extension(path: str) -> str:
@@ -132,23 +171,21 @@ class ImgServer:
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
 
   @classmethod
-  def from_lambda(cls, req: Dict[str, Any]) -> Optional['ImgServer']:
-    log = logging.getLogger(__name__)
-    log_handler = logging.StreamHandler()
-    log_handler.setFormatter(MyJsonFormatter())
-    log_handler.setLevel(logging.DEBUG)
-    log_handler.setStream(sys.stderr)
-    log.addHandler(log_handler)
+  def from_lambda(
+      cls,
+      log: Logger,
+      req: Dict[str, Any],
+  ) -> Optional['ImgServer']:
+    expiration_margin: int = LAMBDA_EXPIRATION_MARGIN
 
     try:
-      region: str = req[HEADERS]['x-env-region']
-      generated_domain: str = req[HEADERS]['x-env-generated-domain']
+      region: str = get_header(req, 'x-env-region')
+      generated_domain: str = get_header(req, 'x-env-generated-domain')
       original_bucket: str = req['origin']['s3']['domainName'].split('.', 1)[0]
-      generated_key_prefix: str = req[HEADERS]['x-env-generated-key-prefix']
-      sqs_queue_url: str = req[HEADERS]['x-env-sqs-queue-url']
-      perm_resp_max_age: int = int(req[HEADERS]['x-env-perm-resp-max-age'])
-      temp_resp_max_age: int = int(req[HEADERS]['x-env-temp-resp-max-age'])
-      expiration_margin: int = int(req[HEADERS]['x-env-expiration-margin'])
+      generated_key_prefix: str = get_header(req, 'x-env-generated-key-prefix')
+      sqs_queue_url: str = get_header(req, 'x-env-sqs-queue-url')
+      perm_resp_max_age: int = int(get_header(req, 'x-env-perm-resp-max-age'))
+      temp_resp_max_age: int = int(get_header(req, 'x-env-temp-resp-max-age'))
     except KeyError as e:
       log.warning({
           MESSAGE: 'environment variable not found',
@@ -195,7 +232,7 @@ class ImgServer:
   def origin_as_generated(
       self, gen_key: str, update: FieldUpdate) -> FieldUpdate:
     update.origin_domain = self.generated_domain
-    update.origin_path = gen_key
+    update.uri = f'/{gen_key}'
     return update
 
   def supports_webp(self, accept_header: str) -> bool:
@@ -371,28 +408,56 @@ class ImgServer:
 
 def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
   req: Dict[str, Any] = event['Records'][0]['cf']['request']
-  accept_header: str = req[HEADERS].get('accept', {'value': ''})['value']
+  accept_header: str = (
+      req[HEADERS]['accept'][0][VALUE] if 'accept' in req[HEADERS] else '')
 
-  server = ImgServer.from_lambda(req)
+  # Set default value
+  req[HEADERS]['x-res-cache-control'] = [{VALUE: ''}]
+
+  server = ImgServer.from_lambda(logger, req)
   if server is None:
     return req
 
   # Remove leading '/'
-  field_update = server.process(req['uri'][1:], accept_header)
+  path = req['uri'][1:]
+  field_update = server.process(path, accept_header)
 
   if field_update.origin_domain is not None:
     req['origin']['s3']['domainName'] = field_update.origin_domain
+    req[HEADERS]['host'][0][VALUE] = field_update.origin_domain
 
-  if field_update.origin_path is not None:
-    req['origin']['s3']['path'] = field_update.origin_path
+  if field_update.uri is not None:
+    req['uri'] = field_update.uri
 
   if field_update.res_cache_control is not None:
-    req[HEADERS]['x-res-cache-control'] = {
-        'value': field_update.res_cache_control,
-    }
+    req[HEADERS]['x-res-cache-control'] = [
+        {
+            VALUE: field_update.res_cache_control,
+        },
+    ]
+
+  server.log.debug(
+      {
+          MESSAGE: 'done',
+          'path': path,
+          'uri': req['uri'],
+          'accept_header': accept_header,
+          'origin_domain': req['origin']['s3']['domainName'],
+          'res_cache_control': req[HEADERS]['x-res-cache-control'][0][VALUE],
+      })
 
   return req
 
 
 def lambda_handler(event: Dict[str, Any], _: Any) -> Any:
-  return lambda_main(event)
+  # # For debugging
+  # print('event:')
+  # print(json.dumps(event))
+
+  ret = lambda_main(event)
+
+  # # For debugging
+  # print('return:')
+  # print(json.dumps(ret))
+
+  return ret

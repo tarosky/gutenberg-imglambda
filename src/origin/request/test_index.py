@@ -256,7 +256,7 @@ class ImgserverTestCase(BaseTestCase):
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            origin_path=f'{self._img_server.generated_key_prefix}{path}.webp',
+            uri=f'/{self._img_server.generated_key_prefix}{path}.webp',
         ), update)
     self.assert_no_sqs_message()
 
@@ -415,7 +415,7 @@ class ImgserverTestCase(BaseTestCase):
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+            uri=f'/{self._img_server.generated_key_prefix}{path}',
         ), update)
     self.assert_no_sqs_message()
 
@@ -465,7 +465,7 @@ class ImgserverTestCase(BaseTestCase):
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+            uri=f'/{self._img_server.generated_key_prefix}{path}',
         ), update)
     self.assert_no_sqs_message()
 
@@ -524,7 +524,7 @@ class ImgserverTestCase(BaseTestCase):
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+            uri=f'/{self._img_server.generated_key_prefix}{path}',
         ), update)
     self.assert_no_sqs_message()
 
@@ -545,7 +545,7 @@ class ImgserverTestCase(BaseTestCase):
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            origin_path=f'{self._img_server.generated_key_prefix}{path}',
+            uri=f'/{self._img_server.generated_key_prefix}{path}',
         ), update)
     self.assert_no_sqs_message()
 
