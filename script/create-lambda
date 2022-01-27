@@ -12,7 +12,7 @@ package_lambda () {
   mkdir -p "$dest"
   rsync -r --delete --exclude=__pycache__ \
     "$src/.venv/lib/python3.9/site-packages/" "$dest"
-  cp "$src/index.py" "$dest"
+  cp "$src/index.py" "$src/VERSION" "$dest"
   touch "$dest/__init__.py"
 
   cd "$dest"
