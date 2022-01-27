@@ -1,0 +1,14 @@
+#!/bin/bash -eu
+
+recreate_venv () {
+  local -r path="$1"
+
+  rm -fr "$path/.venv"
+  python3 -m venv "$path/.venv"
+  . "$path/.venv/bin/activate"
+  pip3 install -r "$path/requirements.txt"
+  deactivate
+}
+
+recreate_venv src/origin/request
+recreate_venv src/origin/response
