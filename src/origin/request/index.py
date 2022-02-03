@@ -42,6 +42,8 @@ minifiable_exts = set([
     '.js',
 ])
 
+API_VERSION = 2
+
 
 def get_version() -> str:
   return Path(__file__).resolve().with_name('VERSION').read_text().strip()
@@ -307,8 +309,16 @@ class ImgServer:
     self.sqs.send_message(
         QueueUrl=self.sqs_queue_url,
         MessageBody=json_dump({
-            'bucket': self.original_bucket,
+            'version': API_VERSION,
             'path': path,
+            'src': {
+              'bucket': self.original_bucket,
+              'prefix': '',
+            },
+            'dest': {
+              'bucket': self.generated_bucket,
+              'prefix': '',
+            },
         }))
     self.log.debug(
         {

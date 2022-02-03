@@ -7,7 +7,7 @@ import time
 import warnings
 from logging import Logger
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from unittest import TestCase
 
 import boto3
@@ -154,7 +154,7 @@ def get_original_object_time(
   return res['LastModified']
 
 
-def receive_sqs_message(img_server: ImgServer) -> Optional[Dict[str, str]]:
+def receive_sqs_message(img_server: ImgServer) -> Optional[Dict[str, Any]]:
   time.sleep(1.0)
   res = img_server.sqs.receive_message(
       QueueUrl=img_server.sqs_queue_url,
@@ -165,7 +165,7 @@ def receive_sqs_message(img_server: ImgServer) -> Optional[Dict[str, str]]:
   if msgs is None or len(msgs) == 0:
     return None
   body: str = msgs[0]['Body']
-  obj: Dict[str, str] = json.loads(body)
+  obj: Dict[str, Any] = json.loads(body)
   return obj
 
 
@@ -203,7 +203,7 @@ class BaseTestCase(TestCase):
 
     put_generated(self._img_server, key, name, mime, timestamp)
 
-  def receive_sqs_message(self) -> Optional[Dict[str, str]]:
+  def receive_sqs_message(self) -> Optional[Dict[str, Any]]:
     return receive_sqs_message(self._img_server)
 
   def assert_no_sqs_message(self) -> None:
@@ -212,8 +212,16 @@ class BaseTestCase(TestCase):
   def assert_sqs_message(self, key: str) -> None:
     self.assertEqual(
         {
-            'bucket': self._img_server.original_bucket,
+            'version': 2,
             'path': key,
+            'src': {
+                'bucket': self._img_server.original_bucket,
+                'prefix': '',
+            },
+            'dest': {
+                'bucket': self._img_server.generated_bucket,
+                'prefix': '',
+            },
         }, self.receive_sqs_message())
 
   def tearDown(self) -> None:
