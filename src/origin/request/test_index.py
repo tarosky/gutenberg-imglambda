@@ -220,7 +220,7 @@ class BaseTestCase(TestCase):
             },
             'dest': {
                 'bucket': self._img_server.generated_bucket,
-                'prefix': '',
+                'prefix': self._img_server.generated_key_prefix,
             },
         }, self.receive_sqs_message())
 
