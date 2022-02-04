@@ -306,26 +306,25 @@ class ImgServer:
     if t_gen == t_orig:
       return
 
-    self.sqs.send_message(
-        QueueUrl=self.sqs_queue_url,
-        MessageBody=json_dump({
-            'version': API_VERSION,
-            'path': path,
-            'src': {
-              'bucket': self.original_bucket,
-              'prefix': '',
-            },
-            'dest': {
-              'bucket': self.generated_bucket,
-              'prefix': '',
-            },
-        }))
-    self.log.debug(
-        {
-            MESSAGE: 'enqueued',
+    body = {
+        'version': API_VERSION,
+        'path': path,
+        'src': {
             'bucket': self.original_bucket,
-            'path': path,
-        })
+            'prefix': '',
+        },
+        'dest': {
+            'bucket': self.generated_bucket,
+            'prefix': self.generated_key_prefix,
+        },
+    }
+
+    self.sqs.send_message(
+        QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
+    self.log.debug({
+        MESSAGE: 'enqueued',
+        'body': body,
+    })
 
   def generate_and_respond_with_original(
       self, path: str, gen_key: str) -> FieldUpdate:
