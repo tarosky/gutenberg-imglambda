@@ -29,15 +29,24 @@ PNG_MIME = 'image/png'
 SOURCEMAP_MIME = 'application/octet-stream'
 WEBP_MIME = "image/webp"
 
-CSS_NAME = 'style.css'
+CSS_NAME = 'スタイル.css'
+CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.css'
 JPG_NAME = 'image.jpg'
 JPG_NAME_U = 'image.JPG'
+JPG_NAME_MB = 'テスト.jpg'
+JPG_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg'
 JPG_WEBP_NAME = 'image.jpg.webp'
 JPG_WEBP_NAME_U = 'image.JPG.webp'
-JS_NAME = 'fizzbuzz.js'
-MIN_CSS_NAME = 'style.min.css'
-MIN_JS_NAME = 'script.min.js'
-SOURCEMAP_NAME = 'script.js.map'
+JPG_WEBP_NAME_MB = 'テスト.jpg.webp'
+JPG_WEBP_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg.webp'
+JS_NAME = 'フィズバズ.js'
+JS_NAME_Q = '%E3%83%95%E3%82%A3%E3%82%BA%E3%83%90%E3%82%BA.js'
+MIN_CSS_NAME = 'スタイル.min.css'
+MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
+MIN_JS_NAME = 'スクリプト.min.js'
+MIN_JS_NAME_Q = '%E3%82%B9%E3%82%AF%E3%83%AA%E3%83%97%E3%83%88.min.js'
+SOURCEMAP_NAME = 'スクリプト.js.map'
+SOURCEMAP_NAME_Q = '%E3%82%B9%E3%82%AF%E3%83%AA%E3%83%97%E3%83%88.js.map'
 
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
@@ -213,7 +222,7 @@ class BaseTestCase(TestCase):
     self.assertEqual(
         {
             'version': 2,
-            'path': key,
+            'path': self._key_prefix + key,
             'src': {
                 'bucket': self._img_server.original_bucket,
                 'prefix': '',
@@ -223,6 +232,12 @@ class BaseTestCase(TestCase):
                 'prefix': self._img_server.generated_key_prefix,
             },
         }, self.receive_sqs_message())
+
+  def to_path(self, name: str) -> str:
+    return f'/{self._key_prefix}{name}'
+
+  def to_uri(self, name: str) -> str:
+    return f'/{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
 
   def tearDown(self) -> None:
     clean_test_environment(self._img_server)
@@ -237,34 +252,39 @@ class ImgserverExpiredTestCase(BaseTestCase):
     ts = self.put_original(JPG_NAME, JPEG_MIME)
     self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
 
-    path = f'{self._key_prefix}{JPG_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(JPG_NAME)
 
 
 class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGAcceptedS3EFS_L
   def test_jpg_accepted_gen_orig_l(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME, JPG_NAME)
+    self.jpg_accepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
 
   # Test_JPGAcceptedS3EFS_U
   def test_jpg_accepted_gen_orig_u(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U)
+    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGAcceptedS3EFS_MB
+  def test_jpg_accepted_gen_orig_mb(self) -> None:
+    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGAcceptedS3EFS
-  def jpg_accepted_gen_orig(self, gen_name: str, orig_name: str) -> None:
+  def jpg_accepted_gen_orig(
+      self, gen_name: str, orig_name: str, path_name: str) -> None:
     ts = self.put_original(orig_name, JPEG_MIME)
     self.put_generated(gen_name, JPEG_MIME, ts)
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            uri=f'/{self._img_server.generated_key_prefix}{path}.webp',
+            uri=self.to_uri(f'{path_name}.webp'),
         ), update)
     self.assert_no_sqs_message()
 
@@ -274,37 +294,46 @@ class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGAcceptedS3NoEFS_L
   def test_jpg_accepted_gen_no_orig_l(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME)
+    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
 
   # Test_JPGAcceptedS3NoEFS_U
   def test_jpg_accepted_gen_no_orig_u(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U)
+    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGAcceptedS3NoEFS_MB
+  def test_jpg_accepted_gen_no_orig_mb(self) -> None:
+    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGAcceptedS3NoEFS
-  def jpg_accepted_gen_no_orig(self, gen_name: str, orig_name: str) -> None:
+  def jpg_accepted_gen_no_orig(
+      self, gen_name: str, orig_name: str, path_name: str) -> None:
     self.put_generated(gen_name, JPEG_MIME, DUMMY_DATETIME)
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(orig_name)
 
   # Test_JPGAcceptedNoS3EFS_L
   def test_jpg_accepted_no_gen_orig_l(self) -> None:
-    self.jpg_accepted_no_gen_orig(JPG_NAME)
+    self.jpg_accepted_no_gen_orig(JPG_NAME, JPG_NAME)
 
   # Test_JPGAcceptedNoS3EFS_U
   def test_jpg_accepted_no_gen_orig_u(self) -> None:
-    self.jpg_accepted_no_gen_orig(JPG_NAME_U)
+    self.jpg_accepted_no_gen_orig(JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGAcceptedNoS3EFS_MB
+  def test_jpg_accepted_no_gen_orig_mb(self) -> None:
+    self.jpg_accepted_no_gen_orig(JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGAcceptedNoS3EFS
-  def jpg_accepted_no_gen_orig(self, orig_name: str) -> None:
+  def jpg_accepted_no_gen_orig(self, orig_name: str, path_name: str) -> None:
     self.put_original(orig_name, JPEG_MIME)
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(orig_name)
 
   # Test_JPGAcceptedNoS3NoEFS_L
   def test_jpg_accepted_no_gen_no_orig_l(self) -> None:
@@ -314,64 +343,83 @@ class ImgserverTestCase(BaseTestCase):
   def test_jpg_accepted_no_gen_no_orig_u(self) -> None:
     self.jpg_accepted_no_gen_no_orig(JPG_NAME_U)
 
+  # Test_JPGAcceptedNoS3NoEFS_MB
+  def test_jpg_accepted_no_gen_no_orig_mb(self) -> None:
+    self.jpg_accepted_no_gen_no_orig(JPG_NAME_MB_Q)
+
   # JPGAcceptedNoS3NoEFS
-  def jpg_accepted_no_gen_no_orig(self, orig_name: str) -> None:
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+  def jpg_accepted_no_gen_no_orig(self, path_name: str) -> None:
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
   # Test_JPGUnacceptedS3EFS_L
   def test_jpg_unaccepted_gen_orig_l(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME, JPG_NAME)
+    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
 
   # Test_JPGUnacceptedS3EFS_U
   def test_jpg_unaccepted_gen_orig_u(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U)
+    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGUnacceptedS3EFS_MB
+  def test_jpg_unaccepted_gen_orig_mb(self) -> None:
+    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGUnacceptedS3EFS
-  def jpg_unaccepted_gen_orig(self, gen_name: str, orig_name: str) -> None:
+  def jpg_unaccepted_gen_orig(
+      self, gen_name: str, orig_name: str, path_name: str) -> None:
     ts = self.put_original(orig_name, JPEG_MIME)
     self.put_generated(gen_name, JPEG_MIME, ts)
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
   # Test_JPGUnacceptedS3NoEFS_L
   def test_jpg_unaccepted_gen_no_orig_l(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME)
+    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
 
   # Test_JPGUnacceptedS3NoEFS_U
   def test_jpg_unaccepted_gen_no_orig_u(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U)
+    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGUnacceptedS3NoEFS_MB
+  def test_jpg_unaccepted_gen_no_orig_mb(self) -> None:
+    self.jpg_unaccepted_gen_no_orig(
+        JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGUnacceptedS3NoEFS
-  def jpg_unaccepted_gen_no_orig(self, gen_name: str, orig_name: str) -> None:
+  def jpg_unaccepted_gen_no_orig(
+      self, gen_name: str, orig_name: str, path_name: str) -> None:
     self.put_generated(gen_name, JPEG_MIME, DUMMY_DATETIME)
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(orig_name)
 
   # Test_JPGUnacceptedNoS3EFS_L
   def test_jpg_unaccepted_no_gen_orig_l(self) -> None:
-    self.jpg_unaccepted_no_gen_orig(JPG_NAME)
+    self.jpg_unaccepted_no_gen_orig(JPG_NAME, JPG_NAME)
 
   # Test_JPGUnacceptedNoS3EFS_U
   def test_jpg_unaccepted_no_gen_orig_u(self) -> None:
-    self.jpg_unaccepted_no_gen_orig(JPG_NAME_U)
+    self.jpg_unaccepted_no_gen_orig(JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGUnacceptedNoS3EFS_MB
+  def test_jpg_unaccepted_no_gen_orig_mb(self) -> None:
+    self.jpg_unaccepted_no_gen_orig(JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGUnacceptedNoS3EFS
-  def jpg_unaccepted_no_gen_orig(self, orig_name: str) -> None:
+  def jpg_unaccepted_no_gen_orig(self, orig_name: str, path_name: str) -> None:
     self.put_original(orig_name, JPEG_MIME)
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(orig_name)
 
   # Test_JPGUnacceptedNoS3NoEFS_L
   def test_jpg_unaccepted_no_gen_no_orig_l(self) -> None:
@@ -381,30 +429,39 @@ class ImgserverTestCase(BaseTestCase):
   def test_jpg_unaccepted_no_gen_no_orig_u(self) -> None:
     self.jpg_unaccepted_no_gen_no_orig(JPG_NAME_U)
 
+  # Test_JPGUnacceptedNoS3NoEFS_MB
+  def test_jpg_unaccepted_no_gen_no_orig_mb(self) -> None:
+    self.jpg_unaccepted_no_gen_no_orig(JPG_NAME_MB_Q)
+
   # JPGUnacceptedNoS3NoEFS
-  def jpg_unaccepted_no_gen_no_orig(self, orig_name: str) -> None:
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, OLD_SAFARI_ACCEPT_HEADER)
+  def jpg_unaccepted_no_gen_no_orig(self, path_name: str) -> None:
+    update = self._img_server.process(
+        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
   # Test_JPGAcceptedS3EFSOld_L
   def test_jpg_accepted_gen_orig_old_l(self) -> None:
-    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME, JPG_NAME)
+    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
 
   # Test_JPGAcceptedS3EFSOld_U
   def test_jpg_accepted_gen_orig_old_u(self) -> None:
-    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME_U, JPG_NAME_U)
+    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+
+  # Test_JPGAcceptedS3EFSOld_MB
+  def test_jpg_accepted_gen_orig_old_mb(self) -> None:
+    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGAcceptedS3EFSOld
-  def jpg_accepted_gen_orig_old(self, gen_name: str, orig_name: str) -> None:
+  def jpg_accepted_gen_orig_old(
+      self, gen_name: str, orig_name: str, path_name: str) -> None:
     ts = self.put_original(orig_name, JPEG_MIME)
     self.put_generated(gen_name, JPEG_MIME, ts + datetime.timedelta(1))
 
-    path = f'{self._key_prefix}{orig_name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(orig_name)
 
   # Skipped:
   #
@@ -417,13 +474,13 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(JS_NAME, JS_MIME)
     self.put_generated(JS_NAME, JS_MIME, ts)
 
-    path = f'{self._key_prefix}{JS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            uri=f'/{self._img_server.generated_key_prefix}{path}',
+            uri=self.to_uri(JS_NAME_Q),
         ), update)
     self.assert_no_sqs_message()
 
@@ -431,24 +488,24 @@ class ImgserverTestCase(BaseTestCase):
   def test_js_gen_no_orig(self) -> None:
     self.put_generated(JS_NAME, JS_MIME, DUMMY_DATETIME)
 
-    path = f'{self._key_prefix}{JS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(JS_NAME)
 
   # Test_JSNoS3EFS
   def test_js_no_gen_orig(self) -> None:
     self.put_original(JS_NAME, JS_MIME)
 
-    path = f'{self._key_prefix}{JS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(JS_NAME)
 
   # Test_JSNoS3NoEFS
   def test_js_no_gen_no_orig(self) -> None:
-    path = f'{self._key_prefix}{JS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
@@ -457,23 +514,23 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(JS_NAME, JS_MIME)
     self.put_generated(JS_NAME, JS_MIME, ts + datetime.timedelta(1))
 
-    path = f'{self._key_prefix}{JS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(JS_NAME)
 
   # Test_CSSS3EFS
   def test_css_gen_orig(self) -> None:
     ts = self.put_original(CSS_NAME, CSS_MIME)
     self.put_generated(CSS_NAME, CSS_MIME, ts)
 
-    path = f'{self._key_prefix}{CSS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            uri=f'/{self._img_server.generated_key_prefix}{path}',
+            uri=self.to_uri(CSS_NAME_Q),
         ), update)
     self.assert_no_sqs_message()
 
@@ -481,24 +538,24 @@ class ImgserverTestCase(BaseTestCase):
   def test_css_gen_no_orig(self) -> None:
     self.put_generated(CSS_NAME, CSS_MIME, DUMMY_DATETIME)
 
-    path = f'{self._key_prefix}{CSS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(CSS_NAME)
 
   # Test_CSSNoS3EFS
   def test_css_no_gen_orig(self) -> None:
     self.put_original(CSS_NAME, CSS_MIME)
 
-    path = f'{self._key_prefix}{CSS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(CSS_NAME)
 
   # Test_CSSNoS3NoEFS
   def test_css_no_gen_no_orig(self) -> None:
-    path = f'{self._key_prefix}{CSS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
@@ -507,18 +564,18 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(CSS_NAME, CSS_MIME)
     self.put_generated(CSS_NAME, CSS_MIME, ts + datetime.timedelta(1))
 
-    path = f'{self._key_prefix}{CSS_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(path)
+    self.assert_sqs_message(CSS_NAME)
 
   # Test_SourceMapS3EFS
   def test_sourcemap_gen_orig(self) -> None:
     ts = self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
     self.put_generated(SOURCEMAP_NAME, SOURCEMAP_MIME, ts)
 
-    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
@@ -526,13 +583,13 @@ class ImgserverTestCase(BaseTestCase):
   def test_sourcemap_gen_no_orig(self) -> None:
     self.put_generated(SOURCEMAP_NAME, SOURCEMAP_MIME, DUMMY_DATETIME)
 
-    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            uri=f'/{self._img_server.generated_key_prefix}{path}',
+            uri=self.to_uri(SOURCEMAP_NAME_Q),
         ), update)
     self.assert_no_sqs_message()
 
@@ -540,20 +597,20 @@ class ImgserverTestCase(BaseTestCase):
   def test_sourcemap_no_gen_orig(self) -> None:
     self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
 
-    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
   # Test_SourceMapNoS3NoEFS
   def test_sourcemap_no_gen_no_orig(self) -> None:
-    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            uri=f'/{self._img_server.generated_key_prefix}{path}',
+            uri=self.to_uri(SOURCEMAP_NAME_Q),
         ), update)
     self.assert_no_sqs_message()
 
@@ -562,75 +619,75 @@ class ImgserverTestCase(BaseTestCase):
     self.put_generated(
         SOURCEMAP_NAME, SOURCEMAP_MIME, ts + datetime.timedelta(1))
 
-    path = f'{self._key_prefix}{SOURCEMAP_NAME}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSS3EFS
   def test_min_js_gen_orig(self) -> None:
-    self.file_gen_orig(MIN_JS_NAME, JS_MIME)
+    self.file_gen_orig(MIN_JS_NAME, MIN_JS_NAME_Q, JS_MIME)
 
   # Test_MinCSSS3EFS
   def test_min_css_gen_orig(self) -> None:
-    self.file_gen_orig(MIN_CSS_NAME, CSS_MIME)
+    self.file_gen_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
 
   # FileS3EFS
-  def file_gen_orig(self, name: str, mime: str) -> None:
-    ts = self.put_original(name, mime)
-    self.put_generated(name, mime, ts)
+  def file_gen_orig(self, key_name: str, path_name: str, mime: str) -> None:
+    ts = self.put_original(key_name, mime)
+    self.put_generated(key_name, mime, ts)
 
-    path = f'{self._key_prefix}{name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSS3NoEFS
   def test_min_js_gen_no_orig(self) -> None:
-    self.file_gen_no_orig(MIN_JS_NAME, JS_MIME)
+    self.file_gen_no_orig(MIN_JS_NAME, MIN_JS_NAME_Q, JS_MIME)
 
   # Test_MinCSSS3NoEFS
   def test_min_css_gen_no_orig(self) -> None:
-    self.file_gen_no_orig(MIN_CSS_NAME, CSS_MIME)
+    self.file_gen_no_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
 
   # FileS3NoEFS
-  def file_gen_no_orig(self, name: str, mime: str) -> None:
-    self.put_generated(name, mime, DUMMY_DATETIME)
+  def file_gen_no_orig(self, key_name: str, path_name: str, mime: str) -> None:
+    self.put_generated(key_name, mime, DUMMY_DATETIME)
 
-    path = f'{self._key_prefix}{name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSNoS3EFS
   def test_min_js_no_gen_orig(self) -> None:
-    self.file_no_gen_orig(MIN_JS_NAME, JS_MIME)
+    self.file_no_gen_orig(MIN_JS_NAME, MIN_JS_NAME_Q, JS_MIME)
 
   # Test_MinCSSNoS3EFS
   def test_min_css_no_gen_orig(self) -> None:
-    self.file_no_gen_orig(MIN_CSS_NAME, CSS_MIME)
+    self.file_no_gen_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
 
   # FileNoS3EFS
-  def file_no_gen_orig(self, name: str, mime: str) -> None:
-    self.put_original(name, mime)
+  def file_no_gen_orig(self, key_name: str, path_name: str, mime: str) -> None:
+    self.put_original(key_name, mime)
 
-    path = f'{self._key_prefix}{name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSNoS3NoEFS
   def test_min_js_no_gen_no_orig(self) -> None:
-    self.file_no_gen_no_orig(MIN_JS_NAME, JS_MIME)
+    self.file_no_gen_no_orig(MIN_JS_NAME_Q)
 
   # Test_MinCSSNoS3NoEFS
   def test_min_css_no_gen_no_orig(self) -> None:
-    self.file_no_gen_no_orig(MIN_CSS_NAME, CSS_MIME)
+    self.file_no_gen_no_orig(MIN_CSS_NAME_Q)
 
   # FileNoS3NoEFS
-  def file_no_gen_no_orig(self, name: str, mime: str) -> None:
-    path = f'{self._key_prefix}{name}'
-    update = self._img_server.process(path, CHROME_ACCEPT_HEADER)
+  def file_no_gen_no_orig(self, path_name: str) -> None:
+    update = self._img_server.process(
+        self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
