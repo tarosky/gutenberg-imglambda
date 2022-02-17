@@ -8,6 +8,7 @@ import sys
 from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib import parse
 
 import boto3
 from botocore.exceptions import ClientError
@@ -58,6 +59,9 @@ def get_now() -> datetime.datetime:
 
 
 class MyJsonFormatter(JsonFormatter):
+
+  def __init__(self) -> None:
+    super().__init__(json_ensure_ascii=False)
 
   def add_fields(self, log_record: Any, record: Any, message_dict: Any) -> None:
     log_record['_ts'] = datetime.datetime.utcnow().strftime(
@@ -119,6 +123,32 @@ class XParams:
   perm_resp_max_age: int
   temp_resp_max_age: int
   expiration_margin: int
+
+
+@dataclasses.dataclass
+class Location:
+  path: str
+  key: str
+  gen_path: str
+  gen_key: str
+
+  @classmethod
+  def from_path(
+      cls, path: str, gen_prefix: str, gen_postfix: str) -> 'Location':
+    key = parse.unquote(path[1:])
+    return cls(
+        path=path,
+        key=key,
+        gen_path=f'/{gen_prefix}{path[1:]}{gen_postfix}',
+        gen_key=f'{gen_prefix}{key}{gen_postfix}')
+
+  def as_dict(self) -> Dict[str, str]:
+    return {
+        'path': self.path,
+        'key': self.key,
+        'gen_path': self.gen_path,
+        'gen_key': self.gen_key,
+    }
 
 
 def json_dump(obj: Any) -> str:
@@ -232,17 +262,17 @@ class ImgServer:
     return update
 
   def origin_as_generated(
-      self, gen_key: str, update: FieldUpdate) -> FieldUpdate:
+      self, loc: Location, update: FieldUpdate) -> FieldUpdate:
     update.origin_domain = self.generated_domain
-    update.uri = f'/{gen_key}'
+    update.uri = loc.gen_path
     return update
 
   def supports_webp(self, accept_header: str) -> bool:
     return 'image/webp' in accept_header
 
-  def get_time_original(self, key: str) -> Optional[datetime.datetime]:
+  def get_time_original(self, loc: Location) -> Optional[datetime.datetime]:
     try:
-      res = self.s3.head_object(Bucket=self.original_bucket, Key=key)
+      res = self.s3.head_object(Bucket=self.original_bucket, Key=loc.key)
     except ClientError as e:
       if is_not_found_client_error(e):
         return None
@@ -254,7 +284,7 @@ class ImgServer:
   def object_expired(
       self,
       now: datetime.datetime,
-      key: str,
+      loc: Location,
       expiration: str,
   ) -> bool:
     d = parse_expiration(expiration)
@@ -263,7 +293,7 @@ class ImgServer:
       self.log.warning(
           {
               MESSAGE: 'expiry-date not found',
-              'key': key,
+              **loc.as_dict(),
               'expiration': expiration,
           })
       return False
@@ -274,16 +304,16 @@ class ImgServer:
   def get_time_generated(
       self,
       now: datetime.datetime,
-      key: str,
+      loc: Location,
   ) -> Optional[datetime.datetime]:
     try:
-      res = self.s3.head_object(Bucket=self.generated_bucket, Key=key)
-      if 'Expiration' in res and self.object_expired(now, key,
+      res = self.s3.head_object(Bucket=self.generated_bucket, Key=loc.gen_key)
+      if 'Expiration' in res and self.object_expired(now, loc,
                                                      res['Expiration']):
         self.log.debug(
             {
                 MESSAGE: 'expired object found',
-                'key': key,
+                **loc.as_dict(),
                 'expiration': res['Expiration'],
             })
         return None
@@ -299,7 +329,7 @@ class ImgServer:
 
   def keep_uptodate(
       self,
-      path: str,
+      loc: Location,
       t_orig: Optional[datetime.datetime],
       t_gen: Optional[datetime.datetime],
   ) -> None:
@@ -308,7 +338,7 @@ class ImgServer:
 
     body = {
         'version': API_VERSION,
-        'path': path,
+        'path': loc.key,
         'src': {
             'bucket': self.original_bucket,
             'prefix': '',
@@ -323,17 +353,17 @@ class ImgServer:
         QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
     self.log.debug({
         MESSAGE: 'enqueued',
+        **loc.as_dict(),
         'body': body,
     })
 
-  def generate_and_respond_with_original(
-      self, path: str, gen_key: str) -> FieldUpdate:
+  def generate_and_respond_with_original(self, loc: Location) -> FieldUpdate:
     try:
       now = get_now()
-      t_gen = self.get_time_generated(now, gen_key)
-      t_orig = self.get_time_original(path)
+      t_gen = self.get_time_generated(now, loc)
+      t_orig = self.get_time_original(loc)
 
-      self.keep_uptodate(path, t_orig, t_gen)
+      self.keep_uptodate(loc, t_orig, t_gen)
 
       if t_orig is not None:
         return self.as_permanent(FieldUpdate())
@@ -342,24 +372,22 @@ class ImgServer:
       self.log.error(
           {
               MESSAGE: 'error during generate_and_respond_with_original()',
-              'path': path,
-              'gen_key': gen_key,
+              **loc.as_dict(),
               'error': str(e),
           })
       return self.as_permanent(FieldUpdate())
 
   def res_with_generated_or_generate_and_res_with_original(
-      self, path: str, gen_key: str) -> FieldUpdate:
+      self, loc: Location) -> FieldUpdate:
     try:
       now = get_now()
-      t_gen = self.get_time_generated(now, gen_key)
-      t_orig = self.get_time_original(path)
+      t_gen = self.get_time_generated(now, loc)
+      t_orig = self.get_time_original(loc)
 
-      self.keep_uptodate(path, t_orig, t_gen)
+      self.keep_uptodate(loc, t_orig, t_gen)
 
       if t_orig is not None and t_orig == t_gen:
-        return self.as_permanent(
-            self.origin_as_generated(gen_key, FieldUpdate()))
+        return self.as_permanent(self.origin_as_generated(loc, FieldUpdate()))
       return self.as_temporary(FieldUpdate())
     except Exception as e:
       self.log.error(
@@ -367,25 +395,22 @@ class ImgServer:
               MESSAGE: (
                   'error during '
                   'res_with_generated_or_generate_and_res_with_original()'),
-              'path': path,
-              'gen_key': gen_key,
+              **loc.as_dict(),
               'error': str(e),
           })
       return self.as_temporary(FieldUpdate())
 
-  def res_with_original_or_generated(
-      self, path: str, gen_key: str) -> FieldUpdate:
+  def res_with_original_or_generated(self, loc: Location) -> FieldUpdate:
     try:
-      t_orig = self.get_time_original(path)
+      t_orig = self.get_time_original(loc)
       if t_orig is not None:
         return self.as_permanent(FieldUpdate())
-      return self.as_permanent(self.origin_as_generated(gen_key, FieldUpdate()))
+      return self.as_permanent(self.origin_as_generated(loc, FieldUpdate()))
     except Exception as e:
       self.log.error(
           {
               MESSAGE: 'error during res_with_original_or_generated()',
-              'path': path,
-              'gen_key': gen_key,
+              **loc.as_dict(),
               'error': str(e),
           })
       return self.as_temporary(FieldUpdate())
@@ -395,20 +420,20 @@ class ImgServer:
 
   def process(self, path: str, accept_header: str) -> FieldUpdate:
     ext = get_normalized_extension(path)
-    gen_key = self.generated_key_prefix + path
 
     if ext in image_exts:
-      img_gen_key = f'{gen_key}.webp'
       if self.supports_webp(accept_header):
         return self.res_with_generated_or_generate_and_res_with_original(
-            path, img_gen_key)
+            Location.from_path(path, self.generated_key_prefix, '.webp'))
       else:
-        return self.generate_and_respond_with_original(path, img_gen_key)
+        return self.generate_and_respond_with_original(
+            Location.from_path(path, self.generated_key_prefix, '.webp'))
     elif ext in minifiable_exts:
       return self.res_with_generated_or_generate_and_res_with_original(
-          path, gen_key)
+          Location.from_path(path, self.generated_key_prefix, ''))
     elif ext == '.js.map':
-      return self.res_with_original_or_generated(path, gen_key)
+      return self.res_with_original_or_generated(
+          Location.from_path(path, self.generated_key_prefix, ''))
     else:
       # This condition includes:
       #   '.min.js' and '.min.css'
@@ -427,8 +452,7 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
   if server is None:
     return req
 
-  # Remove leading '/'
-  path = req['uri'][1:]
+  path = req['uri']
   field_update = server.process(path, accept_header)
 
   if field_update.origin_domain is not None:
