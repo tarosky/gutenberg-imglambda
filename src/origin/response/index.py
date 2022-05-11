@@ -70,6 +70,9 @@ def new_cache_control(req: Dict[str, Any], res: Dict[str, Any]) -> str:
     error_max_age = int(get_header(req, 'x-env-error-max-age', '0'))
     return f'public, max-age={error_max_age}'
 
+  if 'cache-control' in res[HEADERS]:
+    return res[HEADERS]['cache-control'][0][VALUE]
+
   return get_header(req, 'x-res-cache-control', 'public, max-age=0')
 
 
