@@ -639,7 +639,10 @@ class ImgserverTestCase(BaseTestCase):
 
     update = self._img_server.process(
         self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSS3NoEFS
@@ -656,7 +659,10 @@ class ImgserverTestCase(BaseTestCase):
 
     update = self._img_server.process(
         self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSNoS3EFS
@@ -673,7 +679,10 @@ class ImgserverTestCase(BaseTestCase):
 
     update = self._img_server.process(
         self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
 
   # Test_MinJSNoS3NoEFS
@@ -688,7 +697,10 @@ class ImgserverTestCase(BaseTestCase):
   def file_no_gen_no_orig(self, path_name: str) -> None:
     update = self._img_server.process(
         self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
 
 

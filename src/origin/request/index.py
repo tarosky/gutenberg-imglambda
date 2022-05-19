@@ -109,6 +109,7 @@ def parse_expiration(s: str) -> Dict[str, str]:
 @dataclasses.dataclass
 class FieldUpdate:
   res_cache_control: Optional[str] = None
+  res_cache_control_overridable: Optional[str] = None
   origin_domain: Optional[str] = None
   uri: Optional[str] = None
 
@@ -259,6 +260,10 @@ class ImgServer:
 
   def as_temporary(self, update: FieldUpdate) -> FieldUpdate:
     update.res_cache_control = f'public, max-age={self.temp_resp_max_age}'
+    return update
+
+  def as_overridable(self, update: FieldUpdate) -> FieldUpdate:
+    update.res_cache_control_overridable = 'true'
     return update
 
   def origin_as_generated(
@@ -416,7 +421,7 @@ class ImgServer:
       return self.as_temporary(FieldUpdate())
 
   def respond_with_original(self) -> FieldUpdate:
-    return self.as_permanent(FieldUpdate())
+    return self.as_overridable(self.as_permanent(FieldUpdate()))
 
   def process(self, path: str, accept_header: str) -> FieldUpdate:
     ext = get_normalized_extension(path)
@@ -447,6 +452,7 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
 
   # Set default value
   req[HEADERS]['x-res-cache-control'] = [{VALUE: ''}]
+  req[HEADERS]['x-res-cache-control-overridable'] = [{VALUE: ''}]
 
   server = ImgServer.from_lambda(logger, req)
   if server is None:
@@ -469,6 +475,13 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
         },
     ]
 
+  if field_update.res_cache_control_overridable is not None:
+    req[HEADERS]['x-res-cache-control-overridable'] = [
+        {
+            VALUE: field_update.res_cache_control_overridable,
+        },
+    ]
+
   server.log.debug(
       {
           MESSAGE: 'done',
@@ -477,6 +490,8 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
           'accept_header': accept_header,
           'origin_domain': req['origin']['s3']['domainName'],
           'res_cache_control': req[HEADERS]['x-res-cache-control'][0][VALUE],
+          'res_cache_control_overridable': (
+              req[HEADERS]['x-res-cache-control-overridable'][0][VALUE]),
       })
 
   return req
