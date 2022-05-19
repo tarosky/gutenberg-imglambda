@@ -65,12 +65,22 @@ def get_header(req: Dict[str, Any], name: str, default: str) -> str:
   return req[HEADERS][name][0][VALUE]
 
 
+def override_cache_control(req: Dict[str, Any], res: Dict[str, Any]) -> bool:
+  if 'cache-control' not in res[HEADERS]:
+    return False
+
+  if 'x-res-cache-control-overridable' not in req[HEADERS]:
+    return False
+
+  return req[HEADERS]['x-res-cache-control-overridable'][0][VALUE] == 'true'
+
+
 def new_cache_control(req: Dict[str, Any], res: Dict[str, Any]) -> str:
   if 400 <= int(res['status']) < 600:
     error_max_age = int(get_header(req, 'x-env-error-max-age', '0'))
     return f'public, max-age={error_max_age}'
 
-  if 'cache-control' in res[HEADERS]:
+  if override_cache_control(req, res):
     return res[HEADERS]['cache-control'][0][VALUE]
 
   return get_header(req, 'x-res-cache-control', 'public, max-age=0')
