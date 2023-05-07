@@ -13,6 +13,8 @@ from unittest import TestCase
 import boto3
 import pytz
 from mypy_boto3_sqs.type_defs import MessageTypeDef
+from pathspec import PathSpec
+from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 
 from .index import TIMESTAMP_METADATA, FieldUpdate, ImgServer, MyJsonFormatter
 
@@ -22,7 +24,7 @@ GENERATED_KEY_PREFIX = 'prefix/'
 REGION = 'us-east-1'
 
 CSS_MIME = 'text/css'
-GIF_MIME = "image/gif"
+GIF_MIME = 'image/gif'
 JPEG_MIME = 'image/jpeg'
 JS_MIME = 'text/javascript'
 PNG_MIME = 'image/png'
@@ -41,6 +43,8 @@ JPG_WEBP_NAME_MB = 'テスト.jpg.webp'
 JPG_WEBP_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg.webp'
 JS_NAME = 'フィズバズ.js'
 JS_NAME_Q = '%E3%83%95%E3%82%A3%E3%82%BA%E3%83%90%E3%82%BA.js'
+JS_NOMINIFY_NAME = 'nominify/foo/bar/image.js'
+JS_NOMINIFY2_NAME = 'no-minify.js'
 MIN_CSS_NAME = 'スタイル.min.css'
 MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
 MIN_JS_NAME = 'スクリプト.min.js'
@@ -58,6 +62,13 @@ CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
 CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
 
 
+def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
+  return [
+      f'/{key_prefix}nominify/**',
+      '**/no-minify.js',
+  ]
+
+
 def read_test_config(name: str) -> str:
   path = f'{os.getcwd()}/config/test/{name}'
   with open(path, 'r') as f:
@@ -69,7 +80,8 @@ def generate_safe_random_string() -> str:
 
 
 def create_img_server(
-    log: Logger, name: str, expiration_margin: int) -> ImgServer:
+    log: Logger, name: str, expiration_margin: int,
+    key_prefix: str) -> ImgServer:
   account_id = read_test_config('aws-account-id')
   sqs_name = f'test-{name}-{generate_safe_random_string()}'
 
@@ -94,6 +106,8 @@ def create_img_server(
           f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
       perm_resp_max_age=PERM_RESP_MAX_AGE,
       temp_resp_max_age=TEMP_RESP_MAX_AGE,
+      bypass_minifier_path_spec=PathSpec.from_lines(
+          GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
       expiration_margin=expiration_margin)
 
 
@@ -105,8 +119,9 @@ def create_test_environment(
     log: Logger,
     name: str,
     expiration_margin: int,
+    key_prefix: str,
 ) -> ImgServer:
-  img_server = create_img_server(log, name, expiration_margin)
+  img_server = create_img_server(log, name, expiration_margin, key_prefix)
   img_server.sqs.create_queue(
       QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
   return img_server
@@ -171,10 +186,10 @@ def receive_sqs_message(img_server: ImgServer) -> Optional[Dict[str, Any]]:
       VisibilityTimeout=1,
       WaitTimeSeconds=1)
   msgs: Optional[List[MessageTypeDef]] = res.get('Messages', None)
-  if msgs is None or len(msgs) == 0:
+  if msgs is None or len(msgs) == 0 or 'Body' not in msgs[0]:
     return None
-  body: str = msgs[0]['Body']
-  obj: Dict[str, Any] = json.loads(body)
+
+  obj: Dict[str, Any] = json.loads(msgs[0]['Body'])
   return obj
 
 
@@ -196,7 +211,7 @@ class BaseTestCase(TestCase):
     self._log.addHandler(log_handler)
 
     self._img_server = create_test_environment(
-        self._log, 'imglambda', self.get_expiration_margin())
+        self._log, 'imglambda', self.get_expiration_margin(), self._key_prefix)
 
   def get_expiration_margin(self) -> int:
     return 10
@@ -291,6 +306,25 @@ class ImgserverTestCase(BaseTestCase):
   # Skipped:
   #
   # Test_PublicContentJPG
+
+  # Test_BypassMinifierJS
+  def test_bypass_minifier_js_1(self) -> None:
+    update = self._img_server.process(
+        self.to_path(JS_NOMINIFY_NAME), CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true'), update)
+    self.assert_no_sqs_message()
+
+  def test_bypass_minifier_js_2(self) -> None:
+    update = self._img_server.process(
+        self.to_path(JS_NOMINIFY2_NAME), CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true'), update)
+    self.assert_no_sqs_message()
 
   # Test_JPGAcceptedS3NoEFS_L
   def test_jpg_accepted_gen_no_orig_l(self) -> None:
