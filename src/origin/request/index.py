@@ -15,6 +15,8 @@ from botocore.exceptions import ClientError
 from dateutil import parser, tz
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_sqs.client import SQSClient
+from pathspec import PathSpec
+from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
 TIMESTAMP_METADATA = 'original-timestamp'
@@ -123,6 +125,7 @@ class XParams:
   sqs_queue_url: str
   perm_resp_max_age: int
   temp_resp_max_age: int
+  bypass_minifier_patterns: str
   expiration_margin: int
 
 
@@ -157,6 +160,10 @@ def json_dump(obj: Any) -> str:
 
 
 def is_not_found_client_error(exception: ClientError) -> bool:
+  if 'Error' not in exception.response:
+    return False
+  if 'Code' not in exception.response['Error']:
+    return False
   return exception.response['Error']['Code'] == '404'
 
 
@@ -188,6 +195,7 @@ class ImgServer:
       sqs_queue_url: str,
       perm_resp_max_age: int,
       temp_resp_max_age: int,
+      bypass_minifier_path_spec: Optional[PathSpec],
       expiration_margin: int,
   ):
     self.log = log
@@ -201,6 +209,7 @@ class ImgServer:
     self.sqs_queue_url = sqs_queue_url
     self.perm_resp_max_age = perm_resp_max_age
     self.temp_resp_max_age = temp_resp_max_age
+    self.bypass_minifier_path_spec = bypass_minifier_path_spec
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
 
   @classmethod
@@ -219,6 +228,10 @@ class ImgServer:
       sqs_queue_url: str = get_header(req, 'x-env-sqs-queue-url')
       perm_resp_max_age: int = int(get_header(req, 'x-env-perm-resp-max-age'))
       temp_resp_max_age: int = int(get_header(req, 'x-env-temp-resp-max-age'))
+      bypass_minifier_patterns: str = (
+          get_header(req, 'x-bypass-minifier-patterns')
+          if 'x-bypass-minifier-patterns'
+          in req['origin']['s3']['customHeaders'] else '')
     except KeyError as e:
       log.warning({
           MESSAGE: 'environment variable not found',
@@ -234,11 +247,15 @@ class ImgServer:
         sqs_queue_url=sqs_queue_url,
         perm_resp_max_age=perm_resp_max_age,
         temp_resp_max_age=temp_resp_max_age,
+        bypass_minifier_patterns=bypass_minifier_patterns,
         expiration_margin=expiration_margin)
 
     if server_key not in cls.instances:
       sqs = boto3.client('sqs', region_name=region)
       s3 = boto3.client('s3', region_name=region)
+      path_spec = (
+          None if bypass_minifier_patterns == '' else PathSpec.from_lines(
+              GitWildMatchPattern, bypass_minifier_patterns.split(',')))
       cls.instances[server_key] = cls(
           log=log,
           region=region,
@@ -250,6 +267,7 @@ class ImgServer:
           sqs_queue_url=sqs_queue_url,
           perm_resp_max_age=perm_resp_max_age,
           temp_resp_max_age=temp_resp_max_age,
+          bypass_minifier_path_spec=path_spec,
           expiration_margin=expiration_margin)
 
     return cls.instances[server_key]
@@ -424,6 +442,10 @@ class ImgServer:
     return self.as_overridable(self.as_permanent(FieldUpdate()))
 
   def process(self, path: str, accept_header: str) -> FieldUpdate:
+    if self.bypass_minifier_path_spec is not None and (
+        self.bypass_minifier_path_spec.match_file(path)):
+      return self.respond_with_original()
+
     ext = get_normalized_extension(path)
 
     if ext in image_exts:
