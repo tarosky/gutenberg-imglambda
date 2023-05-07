@@ -229,8 +229,8 @@ class ImgServer:
       perm_resp_max_age: int = int(get_header(req, 'x-env-perm-resp-max-age'))
       temp_resp_max_age: int = int(get_header(req, 'x-env-temp-resp-max-age'))
       bypass_minifier_patterns: str = (
-          get_header(req, 'x-bypass-minifier-patterns')
-          if 'x-bypass-minifier-patterns'
+          get_header(req, 'x-env-bypass-minifier-patterns')
+          if 'x-env-bypass-minifier-patterns'
           in req['origin']['s3']['customHeaders'] else '')
     except KeyError as e:
       log.warning({
