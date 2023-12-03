@@ -80,8 +80,8 @@ def generate_safe_random_string() -> str:
 
 
 def create_img_server(
-    log: Logger, name: str, expiration_margin: int,
-    key_prefix: str) -> ImgServer:
+    log: Logger, name: str, expiration_margin: int, key_prefix: str,
+    basedir: str, is_multisite_subdir: bool) -> ImgServer:
   account_id = read_test_config('aws-account-id')
   sqs_name = f'test-{name}-{generate_safe_random_string()}'
 
@@ -108,7 +108,9 @@ def create_img_server(
       temp_resp_max_age=TEMP_RESP_MAX_AGE,
       bypass_minifier_path_spec=PathSpec.from_lines(
           GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
-      expiration_margin=expiration_margin)
+      expiration_margin=expiration_margin,
+      basedir=basedir,
+      is_multisite_subdir=is_multisite_subdir)
 
 
 def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
@@ -120,8 +122,11 @@ def create_test_environment(
     name: str,
     expiration_margin: int,
     key_prefix: str,
+    basedir: str,
+    is_multisite_subdir: bool,
 ) -> ImgServer:
-  img_server = create_img_server(log, name, expiration_margin, key_prefix)
+  img_server = create_img_server(
+      log, name, expiration_margin, key_prefix, basedir, is_multisite_subdir)
   img_server.sqs.create_queue(
       QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
   return img_server
@@ -211,19 +216,30 @@ class BaseTestCase(TestCase):
     self._log.addHandler(log_handler)
 
     self._img_server = create_test_environment(
-        self._log, 'imglambda', self.get_expiration_margin(), self._key_prefix)
+        self._log, 'imglambda', self.get_expiration_margin(), self._key_prefix,
+        self.get_basedir(), self.is_multisite_subdir())
 
   def get_expiration_margin(self) -> int:
     return 10
 
-  def put_original(self, name: str, mime: str) -> datetime.datetime:
+  def get_basedir(self) -> str:
+    return ''
+
+  def is_multisite_subdir(self) -> bool:
+    return False
+
+  def put_original(
+      self, name: str, mime: str, dir: str = '') -> datetime.datetime:
     return put_original(
-        self._img_server, f'{self._key_prefix}{name}', name, mime)
+        self._img_server, f'{dir}{self._key_prefix}{name}', name, mime)
 
   def put_generated(
-      self, name: str, mime: str,
-      timestamp: Optional[datetime.datetime]) -> None:
-    key = f'{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
+      self,
+      name: str,
+      mime: str,
+      timestamp: Optional[datetime.datetime],
+      dir: str = '') -> None:
+    key = f'{self._img_server.generated_key_prefix}{dir}{self._key_prefix}{name}'
 
     put_generated(self._img_server, key, name, mime, timestamp)
 
@@ -248,14 +264,77 @@ class BaseTestCase(TestCase):
             },
         }, self.receive_sqs_message())
 
-  def to_path(self, name: str) -> str:
-    return f'/{self._key_prefix}{name}'
+  def to_path(self, name: str, dir: str = '') -> str:
+    return f'/{dir}{self._key_prefix}{name}'
 
-  def to_uri(self, name: str) -> str:
-    return f'/{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
+  def to_uri(self, name: str, dir: str = '') -> str:
+    return f'/{self._img_server.generated_key_prefix}{dir}{self._key_prefix}{name}'
 
   def tearDown(self) -> None:
     clean_test_environment(self._img_server)
+
+
+class ImgserverBasedirTestCase(BaseTestCase):
+
+  def get_basedir(self) -> str:
+    return '/blog'
+
+  def test_normal(self) -> None:
+    ts = self.put_original(JPG_NAME, JPEG_MIME)
+    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+
+    update = self._img_server.process(
+        '/blog' + self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            uri=self.to_uri(f'{JPG_NAME}.webp'),
+        ), update)
+    self.assert_no_sqs_message()
+
+  def test_no_basedir(self) -> None:
+    ts = self.put_original(JPG_NAME, JPEG_MIME)
+    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+
+    update = self._img_server.process(
+        self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_no_sqs_message()
+
+
+class ImgserverMultisiteSubdirTestCase(BaseTestCase):
+
+  def is_multisite_subdir(self) -> bool:
+    return True
+
+  def test_subdir_wp(self) -> None:
+    ts = self.put_original(JPG_NAME, JPEG_MIME, 'wp-content/uploads/')
+    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts, 'wp-content/uploads/')
+
+    update = self._img_server.process(
+        self.to_path(JPG_NAME, 'blog1/wp-content/uploads/'),
+        CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            uri=self.to_uri(f'{JPG_NAME}.webp', 'wp-content/uploads/')), update)
+    self.assert_no_sqs_message()
+
+  def test_subdir(self) -> None:
+    ts = self.put_original(JPG_NAME, JPEG_MIME)
+    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+
+    update = self._img_server.process(
+        self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            uri=self.to_uri(f'{JPG_NAME}.webp'),
+        ), update)
+    self.assert_no_sqs_message()
 
 
 class ImgserverExpiredTestCase(BaseTestCase):

@@ -45,6 +45,9 @@ minifiable_exts = set([
     '.js',
 ])
 
+expiration_re = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
+ms_subdir_re = re.compile(r'^/[_0-9a-zA-Z-]+(/wp-.*)$')
+
 API_VERSION = 2
 
 
@@ -104,8 +107,7 @@ logger = init_logging()
 
 
 def parse_expiration(s: str) -> Dict[str, str]:
-  pattern = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
-  return {m.group(1): m.group(2) for m in pattern.finditer(s)}
+  return {m.group(1): m.group(2) for m in expiration_re.finditer(s)}
 
 
 @dataclasses.dataclass
@@ -127,6 +129,8 @@ class XParams:
   temp_resp_max_age: int
   bypass_minifier_patterns: str
   expiration_margin: int
+  basedir: str
+  is_multisite_subdir: bool
 
 
 @dataclasses.dataclass
@@ -171,6 +175,12 @@ def get_header(req: Dict[str, Any], name: str) -> str:
   return req['origin']['s3']['customHeaders'][name][0][VALUE]
 
 
+def get_header_or(req: Dict[str, Any], name: str, default: str = '') -> str:
+  return (
+      get_header(req, name)
+      if name in req['origin']['s3']['customHeaders'] else default)
+
+
 def get_normalized_extension(path: str) -> str:
   n = path.lower()
   for le in long_exts:
@@ -197,6 +207,8 @@ class ImgServer:
       temp_resp_max_age: int,
       bypass_minifier_path_spec: Optional[PathSpec],
       expiration_margin: int,
+      basedir: str,
+      is_multisite_subdir: bool,
   ):
     self.log = log
     self.region = region
@@ -211,6 +223,8 @@ class ImgServer:
     self.temp_resp_max_age = temp_resp_max_age
     self.bypass_minifier_path_spec = bypass_minifier_path_spec
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
+    self.basedir = basedir
+    self.is_multisite_subdir = is_multisite_subdir
 
   @classmethod
   def from_lambda(
@@ -228,10 +242,11 @@ class ImgServer:
       sqs_queue_url: str = get_header(req, 'x-env-sqs-queue-url')
       perm_resp_max_age: int = int(get_header(req, 'x-env-perm-resp-max-age'))
       temp_resp_max_age: int = int(get_header(req, 'x-env-temp-resp-max-age'))
-      bypass_minifier_patterns: str = (
-          get_header(req, 'x-env-bypass-minifier-patterns')
-          if 'x-env-bypass-minifier-patterns'
-          in req['origin']['s3']['customHeaders'] else '')
+      bypass_minifier_patterns: str = get_header_or(
+          req, 'x-env-bypass-minifier-patterns')
+      basedir: str = get_header_or(req, 'x-env-basedir')
+      is_multisite_subdir: bool = bool(
+          get_header_or(req, 'x-env-is-multisite-subdir'))
     except KeyError as e:
       log.warning({
           MESSAGE: 'environment variable not found',
@@ -248,7 +263,9 @@ class ImgServer:
         perm_resp_max_age=perm_resp_max_age,
         temp_resp_max_age=temp_resp_max_age,
         bypass_minifier_patterns=bypass_minifier_patterns,
-        expiration_margin=expiration_margin)
+        expiration_margin=expiration_margin,
+        basedir=basedir,
+        is_multisite_subdir=is_multisite_subdir)
 
     if server_key not in cls.instances:
       sqs = boto3.client('sqs', region_name=region)
@@ -268,7 +285,9 @@ class ImgServer:
           perm_resp_max_age=perm_resp_max_age,
           temp_resp_max_age=temp_resp_max_age,
           bypass_minifier_path_spec=path_spec,
-          expiration_margin=expiration_margin)
+          expiration_margin=expiration_margin,
+          basedir=basedir,
+          is_multisite_subdir=is_multisite_subdir)
 
     return cls.instances[server_key]
 
@@ -442,6 +461,20 @@ class ImgServer:
     return self.as_overridable(self.as_permanent(FieldUpdate()))
 
   def process(self, path: str, accept_header: str) -> FieldUpdate:
+    if self.basedir != '':
+      if not path.startswith(self.basedir):
+        self.log.error(
+            {
+                MESSAGE: 'path without basedir passed',
+                'path': path,
+                'basedir': self.basedir,
+            })
+      path = path[len(self.basedir):]
+
+    if self.is_multisite_subdir:
+      if m := ms_subdir_re.match(path):
+        path = m.group(1)
+
     if self.bypass_minifier_path_spec is not None and (
         self.bypass_minifier_path_spec.match_file(path)):
       return self.respond_with_original()
