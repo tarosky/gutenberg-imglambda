@@ -46,7 +46,6 @@ minifiable_exts = set([
 ])
 
 expiration_re = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
-ms_subdir_re = re.compile(r'^/[_0-9a-zA-Z-]+(/wp-.*)$')
 
 API_VERSION = 2
 
@@ -130,7 +129,6 @@ class XParams:
   bypass_minifier_patterns: str
   expiration_margin: int
   basedir: str
-  is_multisite_subdir: bool
 
 
 @dataclasses.dataclass
@@ -208,7 +206,6 @@ class ImgServer:
       bypass_minifier_path_spec: Optional[PathSpec],
       expiration_margin: int,
       basedir: str,
-      is_multisite_subdir: bool,
   ):
     self.log = log
     self.region = region
@@ -224,7 +221,6 @@ class ImgServer:
     self.bypass_minifier_path_spec = bypass_minifier_path_spec
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
     self.basedir = basedir
-    self.is_multisite_subdir = is_multisite_subdir
 
   @classmethod
   def from_lambda(
@@ -245,8 +241,6 @@ class ImgServer:
       bypass_minifier_patterns: str = get_header_or(
           req, 'x-env-bypass-minifier-patterns')
       basedir: str = get_header_or(req, 'x-env-basedir')
-      is_multisite_subdir: bool = bool(
-          get_header_or(req, 'x-env-is-multisite-subdir'))
     except KeyError as e:
       log.warning({
           MESSAGE: 'environment variable not found',
@@ -264,8 +258,7 @@ class ImgServer:
         temp_resp_max_age=temp_resp_max_age,
         bypass_minifier_patterns=bypass_minifier_patterns,
         expiration_margin=expiration_margin,
-        basedir=basedir,
-        is_multisite_subdir=is_multisite_subdir)
+        basedir=basedir)
 
     if server_key not in cls.instances:
       sqs = boto3.client('sqs', region_name=region)
@@ -286,8 +279,7 @@ class ImgServer:
           temp_resp_max_age=temp_resp_max_age,
           bypass_minifier_path_spec=path_spec,
           expiration_margin=expiration_margin,
-          basedir=basedir,
-          is_multisite_subdir=is_multisite_subdir)
+          basedir=basedir)
 
     return cls.instances[server_key]
 
@@ -470,10 +462,6 @@ class ImgServer:
                 'basedir': self.basedir,
             })
       path = path[len(self.basedir):]
-
-    if self.is_multisite_subdir:
-      if m := ms_subdir_re.match(path):
-        path = m.group(1)
 
     if self.bypass_minifier_path_spec is not None and (
         self.bypass_minifier_path_spec.match_file(path)):
