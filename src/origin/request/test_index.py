@@ -270,12 +270,12 @@ class ImgserverBasedirTestCase(BaseTestCase):
   def get_basedir(self) -> str:
     return '/blog'
 
-  def test_normal(self) -> None:
+  def test_generated(self) -> None:
     ts = self.put_original(JPG_NAME, JPEG_MIME)
     self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
 
     update = self._img_server.process(
-        '/blog' + self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+        f'/blog{self.to_path(JPG_NAME)}', CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
@@ -284,13 +284,27 @@ class ImgserverBasedirTestCase(BaseTestCase):
         ), update)
     self.assert_no_sqs_message()
 
-  def test_no_basedir(self) -> None:
+  def test_bypass(self) -> None:
+    update = self._img_server.process(
+        f'/blog{self.to_path(JS_NOMINIFY_NAME)}', CHROME_ACCEPT_HEADER)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            res_cache_control_overridable='true',
+            uri=self.to_path(JS_NOMINIFY_NAME)), update)
+    self.assert_no_sqs_message()
+
+  def test_no_basedir_generated(self) -> None:
     ts = self.put_original(JPG_NAME, JPEG_MIME)
     self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
 
     update = self._img_server.process(
         self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assertEqual(
+        FieldUpdate(
+            res_cache_control=CACHE_CONTROL_PERM,
+            origin_domain=self._img_server.generated_domain,
+            uri=self.to_uri(f'{JPG_NAME}.webp')), update)
     self.assert_no_sqs_message()
 
 

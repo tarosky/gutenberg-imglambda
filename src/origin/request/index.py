@@ -453,6 +453,32 @@ class ImgServer:
     return self.as_overridable(self.as_permanent(FieldUpdate()))
 
   def process(self, path: str, accept_header: str) -> FieldUpdate:
+
+    def run(path: str):
+      if self.bypass_minifier_path_spec is not None and (
+          self.bypass_minifier_path_spec.match_file(path)):
+        return self.respond_with_original()
+
+      ext = get_normalized_extension(path)
+
+      if ext in image_exts:
+        if self.supports_webp(accept_header):
+          return self.res_with_generated_or_generate_and_res_with_original(
+              Location.from_path(path, self.generated_key_prefix, '.webp'))
+        else:
+          return self.generate_and_respond_with_original(
+              Location.from_path(path, self.generated_key_prefix, '.webp'))
+      elif ext in minifiable_exts:
+        return self.res_with_generated_or_generate_and_res_with_original(
+            Location.from_path(path, self.generated_key_prefix, ''))
+      elif ext == '.js.map':
+        return self.res_with_original_or_generated(
+            Location.from_path(path, self.generated_key_prefix, ''))
+      else:
+        # This condition includes:
+        #   '.min.js' and '.min.css'
+        return self.respond_with_original()
+
     if self.basedir != '':
       if not path.startswith(self.basedir):
         self.log.error(
@@ -461,31 +487,14 @@ class ImgServer:
                 'path': path,
                 'basedir': self.basedir,
             })
-      path = path[len(self.basedir):]
-
-    if self.bypass_minifier_path_spec is not None and (
-        self.bypass_minifier_path_spec.match_file(path)):
-      return self.respond_with_original()
-
-    ext = get_normalized_extension(path)
-
-    if ext in image_exts:
-      if self.supports_webp(accept_header):
-        return self.res_with_generated_or_generate_and_res_with_original(
-            Location.from_path(path, self.generated_key_prefix, '.webp'))
       else:
-        return self.generate_and_respond_with_original(
-            Location.from_path(path, self.generated_key_prefix, '.webp'))
-    elif ext in minifiable_exts:
-      return self.res_with_generated_or_generate_and_res_with_original(
-          Location.from_path(path, self.generated_key_prefix, ''))
-    elif ext == '.js.map':
-      return self.res_with_original_or_generated(
-          Location.from_path(path, self.generated_key_prefix, ''))
-    else:
-      # This condition includes:
-      #   '.min.js' and '.min.css'
-      return self.respond_with_original()
+        path = path[len(self.basedir):]
+
+    fu = run(path)
+    if self.basedir != '' and fu.uri is None:
+      fu.uri = path
+
+    return fu
 
 
 def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
