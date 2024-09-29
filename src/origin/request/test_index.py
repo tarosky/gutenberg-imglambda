@@ -26,7 +26,6 @@ REGION = 'us-east-1'
 CSS_MIME = 'text/css'
 GIF_MIME = 'image/gif'
 JPEG_MIME = 'image/jpeg'
-JS_MIME = 'text/javascript'
 PNG_MIME = 'image/png'
 SOURCEMAP_MIME = 'application/octet-stream'
 WEBP_MIME = "image/webp"
@@ -41,16 +40,9 @@ JPG_WEBP_NAME = 'image.jpg.webp'
 JPG_WEBP_NAME_U = 'image.JPG.webp'
 JPG_WEBP_NAME_MB = 'テスト.jpg.webp'
 JPG_WEBP_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg.webp'
-JS_NAME = 'フィズバズ.js'
-JS_NAME_Q = '%E3%83%95%E3%82%A3%E3%82%BA%E3%83%90%E3%82%BA.js'
-JS_NOMINIFY_NAME = 'nominify/foo/bar/image.js'
-JS_NOMINIFY2_NAME = 'no-minify.js'
+JPG_NOMINIFY_NAME = 'nominify/foo/bar/image.jpg'
 MIN_CSS_NAME = 'スタイル.min.css'
 MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
-MIN_JS_NAME = 'スクリプト.min.js'
-MIN_JS_NAME_Q = '%E3%82%B9%E3%82%AF%E3%83%AA%E3%83%97%E3%83%88.min.js'
-SOURCEMAP_NAME = 'スクリプト.js.map'
-SOURCEMAP_NAME_Q = '%E3%82%B9%E3%82%AF%E3%83%AA%E3%83%97%E3%83%88.js.map'
 
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
@@ -65,7 +57,6 @@ CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
 def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
   return [
       f'/{key_prefix}nominify/**',
-      '**/no-minify.js',
   ]
 
 
@@ -286,12 +277,12 @@ class ImgserverBasedirTestCase(BaseTestCase):
 
   def test_bypass(self) -> None:
     update = self._img_server.process(
-        f'/blog{self.to_path(JS_NOMINIFY_NAME)}', CHROME_ACCEPT_HEADER)
+        f'/blog{self.to_path(JPG_NOMINIFY_NAME)}', CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             res_cache_control_overridable='true',
-            uri=self.to_path(JS_NOMINIFY_NAME)), update)
+            uri=self.to_path(JPG_NOMINIFY_NAME)), update)
     self.assert_no_sqs_message()
 
   def test_no_basedir_generated(self) -> None:
@@ -356,25 +347,6 @@ class ImgserverTestCase(BaseTestCase):
   # Skipped:
   #
   # Test_PublicContentJPG
-
-  # Test_BypassMinifierJS
-  def test_bypass_minifier_js_1(self) -> None:
-    update = self._img_server.process(
-        self.to_path(JS_NOMINIFY_NAME), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true'), update)
-    self.assert_no_sqs_message()
-
-  def test_bypass_minifier_js_2(self) -> None:
-    update = self._img_server.process(
-        self.to_path(JS_NOMINIFY2_NAME), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true'), update)
-    self.assert_no_sqs_message()
 
   # Test_JPGAcceptedS3NoEFS_L
   def test_jpg_accepted_gen_no_orig_l(self) -> None:
@@ -553,56 +525,6 @@ class ImgserverTestCase(BaseTestCase):
   # Test_JPGAcceptedNoS3EFSBatchSendWait
   # Test_ReopenLogFile
 
-  # Test_JSS3EFS
-  def test_js_gen_orig(self) -> None:
-    ts = self.put_original(JS_NAME, JS_MIME)
-    self.put_generated(JS_NAME, JS_MIME, ts)
-
-    update = self._img_server.process(
-        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(JS_NAME_Q),
-        ), update)
-    self.assert_no_sqs_message()
-
-  # Test_JSS3NoEFS
-  def test_js_gen_no_orig(self) -> None:
-    self.put_generated(JS_NAME, JS_MIME, DUMMY_DATETIME)
-
-    update = self._img_server.process(
-        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(JS_NAME)
-
-  # Test_JSNoS3EFS
-  def test_js_no_gen_orig(self) -> None:
-    self.put_original(JS_NAME, JS_MIME)
-
-    update = self._img_server.process(
-        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(JS_NAME)
-
-  # Test_JSNoS3NoEFS
-  def test_js_no_gen_no_orig(self) -> None:
-    update = self._img_server.process(
-        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_no_sqs_message()
-
-  # Test_JSS3EFSOld
-  def test_js_gen_orig_old(self) -> None:
-    ts = self.put_original(JS_NAME, JS_MIME)
-    self.put_generated(JS_NAME, JS_MIME, ts + datetime.timedelta(1))
-
-    update = self._img_server.process(
-        self.to_path(JS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(JS_NAME)
-
   # Test_CSSS3EFS
   def test_css_gen_orig(self) -> None:
     ts = self.put_original(CSS_NAME, CSS_MIME)
@@ -653,65 +575,6 @@ class ImgserverTestCase(BaseTestCase):
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(CSS_NAME)
 
-  # Test_SourceMapS3EFS
-  def test_sourcemap_gen_orig(self) -> None:
-    ts = self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
-    self.put_generated(SOURCEMAP_NAME, SOURCEMAP_MIME, ts)
-
-    update = self._img_server.process(
-        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
-    self.assert_no_sqs_message()
-
-  # Test_SourceMapS3NoEFS
-  def test_sourcemap_gen_no_orig(self) -> None:
-    self.put_generated(SOURCEMAP_NAME, SOURCEMAP_MIME, DUMMY_DATETIME)
-
-    update = self._img_server.process(
-        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(SOURCEMAP_NAME_Q),
-        ), update)
-    self.assert_no_sqs_message()
-
-  # Test_SourceMapNoS3EFS
-  def test_sourcemap_no_gen_orig(self) -> None:
-    self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
-
-    update = self._img_server.process(
-        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
-    self.assert_no_sqs_message()
-
-  # Test_SourceMapNoS3NoEFS
-  def test_sourcemap_no_gen_no_orig(self) -> None:
-    update = self._img_server.process(
-        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(SOURCEMAP_NAME_Q),
-        ), update)
-    self.assert_no_sqs_message()
-
-  def test_sourcemap_gen_orig_old(self) -> None:
-    ts = self.put_original(SOURCEMAP_NAME, SOURCEMAP_MIME)
-    self.put_generated(
-        SOURCEMAP_NAME, SOURCEMAP_MIME, ts + datetime.timedelta(1))
-
-    update = self._img_server.process(
-        self.to_path(SOURCEMAP_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
-    self.assert_no_sqs_message()
-
-  # Test_MinJSS3EFS
-  def test_min_js_gen_orig(self) -> None:
-    self.file_gen_orig(MIN_JS_NAME, MIN_JS_NAME_Q, JS_MIME)
-
   # Test_MinCSSS3EFS
   def test_min_css_gen_orig(self) -> None:
     self.file_gen_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
@@ -729,10 +592,6 @@ class ImgserverTestCase(BaseTestCase):
             res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
 
-  # Test_MinJSS3NoEFS
-  def test_min_js_gen_no_orig(self) -> None:
-    self.file_gen_no_orig(MIN_JS_NAME, MIN_JS_NAME_Q, JS_MIME)
-
   # Test_MinCSSS3NoEFS
   def test_min_css_gen_no_orig(self) -> None:
     self.file_gen_no_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
@@ -749,10 +608,6 @@ class ImgserverTestCase(BaseTestCase):
             res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
 
-  # Test_MinJSNoS3EFS
-  def test_min_js_no_gen_orig(self) -> None:
-    self.file_no_gen_orig(MIN_JS_NAME, MIN_JS_NAME_Q, JS_MIME)
-
   # Test_MinCSSNoS3EFS
   def test_min_css_no_gen_orig(self) -> None:
     self.file_no_gen_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
@@ -768,10 +623,6 @@ class ImgserverTestCase(BaseTestCase):
             res_cache_control=CACHE_CONTROL_PERM,
             res_cache_control_overridable='true'), update)
     self.assert_no_sqs_message()
-
-  # Test_MinJSNoS3NoEFS
-  def test_min_js_no_gen_no_orig(self) -> None:
-    self.file_no_gen_no_orig(MIN_JS_NAME_Q)
 
   # Test_MinCSSNoS3NoEFS
   def test_min_css_no_gen_no_orig(self) -> None:
