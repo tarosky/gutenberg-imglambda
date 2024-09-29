@@ -35,14 +35,11 @@ image_exts = set([
 ])
 
 long_exts = [
-    '.js.map',
-    '.min.js',
     '.min.css',
 ]
 
 minifiable_exts = set([
     '.css',
-    '.js',
 ])
 
 expiration_re = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
@@ -471,12 +468,9 @@ class ImgServer:
       elif ext in minifiable_exts:
         return self.res_with_generated_or_generate_and_res_with_original(
             Location.from_path(path, self.generated_key_prefix, ''))
-      elif ext == '.js.map':
-        return self.res_with_original_or_generated(
-            Location.from_path(path, self.generated_key_prefix, ''))
       else:
         # This condition includes:
-        #   '.min.js' and '.min.css'
+        #   '.min.css'
         return self.respond_with_original()
 
     if self.basedir != '':
