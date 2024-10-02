@@ -78,6 +78,7 @@ jobs:
       env:
         TEST_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
     - run: poetry install --sync
+      working-directory: src/origin-request
     - run: poetry run python -m xmlrunner --output-file ../../work/report-origin-request.xml originrequest/test_index.py 2>&1
       working-directory: src/origin-request
     - name: Publish Unit Test Results
