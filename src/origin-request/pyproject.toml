@@ -1,0 +1,48 @@
+[tool.poetry]
+name = "gutenberg-imglambda-originrequest"
+version = "0.1.0"
+description = ""
+authors = ["Akihiro Harai <mail@harai.click>"]
+package-mode = false
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "~3.11"
+boto3 = "^1.35.29"
+pathspec = "^0.12.1"
+python-dateutil = "^2.9.0"
+python-json-logger = "^2.0.7"
+pytz = "*"
+
+[tool.poetry.group.dev.dependencies]
+autopep8 = "*"
+boto3-stubs = { version = "^1.35.29", extras = ["s3", "sqs"] }
+flake8 = "*"
+mypy-boto3-s3 = "^1.35.22"
+mypy-boto3-sqs = "^1.35.0"
+mypy-boto3-builder = "*"
+mypy = "^1.11.2"
+pep8 = "*"
+types-python-dateutil = "^2.9.0.20240906"
+types-pytz = "*"
+unittest-xml-reporting = "^3.2.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.isort]
+order_by_type = 1
+balanced_wrapping = 1
+multi_line_output = 3
+
+[tool.pep8]
+select = "E3"
+
+[tool.yapf]
+based_on_style = "google"
+split_before_first_argument = true
+dedent_closing_brackets = false
+indent_width = 2
+allow_split_before_dict_value = false
+indent_dictionary_value = false

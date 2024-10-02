@@ -17,19 +17,21 @@ env:
   TEST_ACCESS_KEY_ID: AKIAQGFE5ESVKGVB3XGS
   TEST_GENERATED_BUCKET: gutenberg-ext-imglambda-testgeneratedbucket-n8c79jl0mzd2
   TEST_ORIGINAL_BUCKET: gutenberg-ext-imglambda-testoriginalbucket-fz28m8cblu5t
-  PYTHON_VERSION: 3.9.8
+  PYTHON_VERSION: 3.11.10
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
+    - uses: actions/checkout@main
+    - uses: actions/setup-python@main
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
+    - name: Python Poetry Action
+      uses: abatilo/actions-poetry@master
     - run: script/recreate-venv
     - name: Generate build number
-      uses: onyxmueller/build-tag-number@v1
+      uses: onyxmueller/build-tag-number@main
       with:
         token: ${{secrets.GITHUB_TOKEN}}
         prefix: build_number_generator
@@ -38,33 +40,35 @@ jobs:
     - name: Save the build number
       run: echo "$BUILD_NUMBER" > work/BUILD_NUMBER
     - name: Embed build number into code
-      run: echo "build-$BUILD_NUMBER" > src/origin/request/VERSION
+      run: echo "build-$BUILD_NUMBER" > src/origin-request/VERSION
     - name: Embed build number into code
-      run: echo "build-$BUILD_NUMBER" > src/origin/response/VERSION
+      run: echo "build-$BUILD_NUMBER" > src/origin-response/VERSION
     - run: script/create-lambda
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@main
       with:
         name: artifact
         path: |
           work/origin-request.zip
           work/origin-response.zip
         if-no-files-found: error
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@main
       with:
         name: build-number
         path: work/BUILD_NUMBER
         if-no-files-found: error
 
   test:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     permissions:
       checks: write
       pull-requests: write
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
+    - uses: actions/checkout@main
+    - uses: actions/setup-python@main
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
+    - name: Python Poetry Action
+      uses: abatilo/actions-poetry@master
     - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
     - run: echo "$AWS_ACCOUNT_ID" > config/test/aws-account-id
     - run: echo "$TEST_GENERATED_BUCKET" > config/test/generated-bucket
@@ -72,31 +76,33 @@ jobs:
     - run: echo "$TEST_SECRET_ACCESS_KEY" > config/test/secret-access-key
       env:
         TEST_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
-    - run: pip install -r requirements.txt
-    - run: python -m xmlrunner --output-file work/report.xml src/origin/request/test_index.py 2>&1
+    - run: poetry install --sync
+      working-directory: src/origin-request
+    - run: poetry run python -m xmlrunner --output-file ../../work/report-origin-request.xml originrequest/test_index.py 2>&1
+      working-directory: src/origin-request
     - name: Publish Unit Test Results
-      uses: EnricoMi/publish-unit-test-result-action@v2
+      uses: EnricoMi/publish-unit-test-result-action@master
       if: always()
       with:
-        files: work/report.xml
+        files: work/report-origin-request.xml
 
   release:
     needs:
     - build
     - test
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@main
       with:
         name: artifact
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@main
       with:
         name: build-number
     - name: set BUILD_NUMBER
       run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
     - id: create_release
-      uses: actions/create-release@v1
+      uses: actions/create-release@main
       env:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
@@ -104,26 +110,26 @@ jobs:
         release_name: Build ${{env.BUILD_NUMBER}}
         draft: false
         prerelease: false
-    - uses: actions/upload-release-asset@v1
+    - uses: actions/upload-release-asset@main
       env:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-request.zip
-        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
+        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
         asset_content_type: application/octet-stream
-    - uses: actions/upload-release-asset@v1
+    - uses: actions/upload-release-asset@main
       env:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-response.zip
-        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
+        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
         asset_content_type: application/octet-stream
-    - uses: aws-actions/configure-aws-credentials@v2
+    - uses: aws-actions/configure-aws-credentials@main
       with:
         aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
         aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
         aws-region: us-east-1
-    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
-    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
+    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip

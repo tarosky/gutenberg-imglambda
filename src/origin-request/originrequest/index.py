@@ -48,7 +48,7 @@ API_VERSION = 2
 
 
 def get_version() -> str:
-  return Path(__file__).resolve().with_name('VERSION').read_text().strip()
+  return Path(__file__).parent.resolve().with_name('VERSION').read_text().strip()
 
 
 version = get_version()
@@ -65,7 +65,7 @@ class MyJsonFormatter(JsonFormatter):
     super().__init__(json_ensure_ascii=False)
 
   def add_fields(self, log_record: Any, record: Any, message_dict: Any) -> None:
-    log_record['_ts'] = datetime.datetime.utcnow().strftime(
+    log_record['_ts'] = datetime.datetime.now(datetime.UTC).strftime(
         '%Y-%m-%dT%H:%M:%S.%fZ')
 
     if log_record.get('level'):
@@ -541,17 +541,3 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
       })
 
   return req
-
-
-def lambda_handler(event: Dict[str, Any], _: Any) -> Any:
-  # # For debugging
-  # print('event:')
-  # print(json.dumps(event))
-
-  ret = lambda_main(event)
-
-  # # For debugging
-  # print('return:')
-  # print(json.dumps(ret))
-
-  return ret

@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "gutenberg-imglambda"
+version = "0.1.0"
+description = ""
+authors = ["Akihiro Harai <mail@harai.click>"]
+readme = "README.md"
+package-mode = false
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "~3.11"
+
+[tool.poetry.group.dev.dependencies]
+autopep8 = "*"
+flake8 = "*"
+isort = "*"
+pep8 = "*"
+yapf = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.isort]
+order_by_type = 1
+balanced_wrapping = 1
+multi_line_output = 3
+
+[tool.pep8]
+select = "E3"
+
+[tool.yapf]
+based_on_style = "google"
+split_before_first_argument = true
+dedent_closing_brackets = false
+indent_width = 2
+allow_split_before_dict_value = false
+indent_dictionary_value = false

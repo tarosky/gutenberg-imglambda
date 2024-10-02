@@ -61,7 +61,7 @@ def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
 
 
 def read_test_config(name: str) -> str:
-  path = f'{os.getcwd()}/config/test/{name}'
+  path = f'{os.getcwd()}/../../config/test/{name}'
   with open(path, 'r') as f:
     return f.read().strip()
 
@@ -131,7 +131,7 @@ def put_original(
     name: str,
     mime: str,
 ) -> datetime.datetime:
-  path = f'{os.getcwd()}/samplefile/original/{name}'
+  path = f'{os.getcwd()}/../../samplefile/original/{name}'
   with open(path, 'rb') as f:
     img_server.s3.put_object(
         Body=f,
@@ -150,7 +150,7 @@ def put_generated(
     mime: str,
     timestamp: Optional[datetime.datetime] = None,
 ) -> None:
-  path = f'{os.getcwd()}/samplefile/generated/{name}'
+  path = f'{os.getcwd()}/../../samplefile/generated/{name}'
   metadata = {}
   if timestamp is not None:
     metadata[TIMESTAMP_METADATA] = timestamp.astimezone(
@@ -194,7 +194,7 @@ class BaseTestCase(TestCase):
     self._key_prefix = generate_safe_random_string() + '/'
     self._log = logging.getLogger(__name__)
 
-    log_dir = f'{os.getcwd()}/work/test/imglambda/{self._key_prefix}'
+    log_dir = f'{os.getcwd()}/../../work/test/imglambda/{self._key_prefix}'
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     self._log_file = open(f'{log_dir}/test.log', 'w')
 
