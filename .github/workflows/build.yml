@@ -69,7 +69,7 @@ jobs:
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
     - name: Python Poetry Action
-      uses: abatilo/actions-poetry@main
+      uses: abatilo/actions-poetry@master
     - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
     - run: echo "$AWS_ACCOUNT_ID" > config/test/aws-account-id
     - run: echo "$TEST_GENERATED_BUCKET" > config/test/generated-bucket
