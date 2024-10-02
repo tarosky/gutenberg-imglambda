@@ -41,9 +41,9 @@ jobs:
     - name: Save the build number
       run: echo "$BUILD_NUMBER" > work/BUILD_NUMBER
     - name: Embed build number into code
-      run: echo "build-$BUILD_NUMBER" > src/origin/request/VERSION
+      run: echo "build-$BUILD_NUMBER" > src/origin-request/VERSION
     - name: Embed build number into code
-      run: echo "build-$BUILD_NUMBER" > src/origin/response/VERSION
+      run: echo "build-$BUILD_NUMBER" > src/origin-response/VERSION
     - run: script/create-lambda
     - uses: actions/upload-artifact@main
       with:
@@ -81,7 +81,7 @@ jobs:
     - run: poetry run python -m xmlrunner --output-file ../../work/report-origin-request.xml originrequest/test_index.py 2>&1
       working-directory: src/origin-request
     - name: Publish Unit Test Results
-      uses: EnricoMi/publish-unit-test-result-action@main
+      uses: EnricoMi/publish-unit-test-result-action@master
       if: always()
       with:
         files: work/report-origin-request.xml
