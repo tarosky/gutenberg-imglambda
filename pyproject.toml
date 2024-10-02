@@ -15,7 +15,6 @@ autopep8 = "*"
 flake8 = "*"
 isort = "*"
 pep8 = "*"
-unittest-xml-reporting = "^3.2.0"
 yapf = "*"
 
 [build-system]

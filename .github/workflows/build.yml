@@ -28,6 +28,8 @@ jobs:
     - uses: actions/setup-python@main
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
+    - name: Python Poetry Action
+      uses: abatilo/actions-poetry@main
     - run: script/recreate-venv
     - name: Generate build number
       uses: onyxmueller/build-tag-number@main
@@ -66,6 +68,8 @@ jobs:
     - uses: actions/setup-python@main
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
+    - name: Python Poetry Action
+      uses: abatilo/actions-poetry@main
     - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
     - run: echo "$AWS_ACCOUNT_ID" > config/test/aws-account-id
     - run: echo "$TEST_GENERATED_BUCKET" > config/test/generated-bucket
@@ -73,20 +77,21 @@ jobs:
     - run: echo "$TEST_SECRET_ACCESS_KEY" > config/test/secret-access-key
       env:
         TEST_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
-    - run: pip install -r requirements.txt
-    - run: python -m xmlrunner --output-file work/report.xml src/origin/request/test_index.py 2>&1
+    - run: poetry install --sync
+    - run: poetry run python -m xmlrunner --output-file ../../work/report-origin-request.xml originrequest/test_index.py 2>&1
+      working-directory: src/origin-request
     - name: Publish Unit Test Results
-      uses: EnricoMi/publish-unit-test-result-action@v2
+      uses: EnricoMi/publish-unit-test-result-action@main
       if: always()
       with:
-        files: work/report.xml
+        files: work/report-origin-request.xml
 
   release:
     needs:
     - build
     - test
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/download-artifact@main
       with:
