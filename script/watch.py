@@ -61,7 +61,7 @@ def beautify_with_autopep8_yapf_isort(path):
   autopep8ed_contents = autopep8.fix_code(contents, apply_config=True)
   try:
     yapfed_contents, _ = FormatCode(
-        autopep8ed_contents, filename=path, style_config='setup.cfg')
+        autopep8ed_contents, filename=path, style_config='./pyproject.toml')
   except SyntaxError as e:
     print(e)
     return False

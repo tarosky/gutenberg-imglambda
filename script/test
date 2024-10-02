@@ -1,19 +1,25 @@
 #!/bin/bash -eu
 
-path="$1"
-
-abs="$(realpath "$path")"
-dir="$(dirname $abs)"
-file="$(basename $path)"
-if [[ "$file" == test_* ]]; then
-  test="$dir/$file"
+if [ -z "${1:-}" ]; then
+  cd src/origin-request
+  exec poetry run python -m unittest discover -v -p 'test_*.py'
 else
-  test="$dir/test_$file"
-fi
+  path="$1"
 
-if [ ! -e "$test" ]; then
-  exit 0
-fi
+  abs="$(realpath "$path")"
+  dir="$(dirname "$abs")"
+  file="$(basename "$path")"
+  if [[ "$file" == test_* ]]; then
+    test="$dir/$file"
+  else
+    test="$dir/test_$file"
+  fi
 
-echo "Tests running: $test"
-exec python -m unittest -v "$test"
+  if [ ! -e "$test" ]; then
+    exit 0
+  fi
+
+  cd "$(realpath --relative-to="${PWD}" "$abs" | cut -d'/' -f-2)"
+  echo "Tests running: $test"
+  exec poetry run python -m unittest -v "$test"
+fi

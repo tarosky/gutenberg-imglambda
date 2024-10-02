@@ -13,7 +13,7 @@ MESSAGE = 'message'
 
 
 def get_version() -> str:
-  return Path(__file__).resolve().with_name('VERSION').read_text().strip()
+  return Path(__file__).parent.resolve().with_name('VERSION').read_text().strip()
 
 
 version = get_version()
@@ -22,7 +22,7 @@ version = get_version()
 class MyJsonFormatter(JsonFormatter):
 
   def add_fields(self, log_record: Any, record: Any, message_dict: Any) -> None:
-    log_record['_ts'] = datetime.datetime.utcnow().strftime(
+    log_record['_ts'] = datetime.datetime.now(datetime.UTC).strftime(
         '%Y-%m-%dT%H:%M:%S.%fZ')
 
     if log_record.get('level'):
@@ -97,18 +97,3 @@ def main(req: Dict[str, Any], res: Dict[str, Any]) -> Dict[str, Any]:
       })
   res[HEADERS]['cache-control'] = [{VALUE: cache_control}]
   return res
-
-
-def lambda_handler(event: Dict[str, Any], _: Any) -> Dict[str, Any]:
-  # # For debugging
-  # print('event:')
-  # print(json.dumps(event))
-
-  cf: Dict[str, Any] = event['Records'][0]['cf']
-  ret = main(cf['request'], cf['response'])
-
-  # # For debugging
-  # print('return:')
-  # print(json.dumps(ret))
-
-  return ret

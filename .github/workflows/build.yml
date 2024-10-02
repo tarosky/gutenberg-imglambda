@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
     - master
+    - issue/*
   push:
     branches:
     - master
@@ -17,19 +18,19 @@ env:
   TEST_ACCESS_KEY_ID: AKIAQGFE5ESVKGVB3XGS
   TEST_GENERATED_BUCKET: gutenberg-ext-imglambda-testgeneratedbucket-n8c79jl0mzd2
   TEST_ORIGINAL_BUCKET: gutenberg-ext-imglambda-testoriginalbucket-fz28m8cblu5t
-  PYTHON_VERSION: 3.9.8
+  PYTHON_VERSION: 3.11.10
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
+    - uses: actions/checkout@main
+    - uses: actions/setup-python@main
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
     - run: script/recreate-venv
     - name: Generate build number
-      uses: onyxmueller/build-tag-number@v1
+      uses: onyxmueller/build-tag-number@main
       with:
         token: ${{secrets.GITHUB_TOKEN}}
         prefix: build_number_generator
@@ -42,27 +43,27 @@ jobs:
     - name: Embed build number into code
       run: echo "build-$BUILD_NUMBER" > src/origin/response/VERSION
     - run: script/create-lambda
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@main
       with:
         name: artifact
         path: |
           work/origin-request.zip
           work/origin-response.zip
         if-no-files-found: error
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@main
       with:
         name: build-number
         path: work/BUILD_NUMBER
         if-no-files-found: error
 
   test:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     permissions:
       checks: write
       pull-requests: write
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
+    - uses: actions/checkout@main
+    - uses: actions/setup-python@main
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
     - run: echo "$TEST_ACCESS_KEY_ID" > config/test/access-key-id
@@ -87,16 +88,16 @@ jobs:
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-20.04
     steps:
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@main
       with:
         name: artifact
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@main
       with:
         name: build-number
     - name: set BUILD_NUMBER
       run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
     - id: create_release
-      uses: actions/create-release@v1
+      uses: actions/create-release@main
       env:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
@@ -104,26 +105,26 @@ jobs:
         release_name: Build ${{env.BUILD_NUMBER}}
         draft: false
         prerelease: false
-    - uses: actions/upload-release-asset@v1
+    - uses: actions/upload-release-asset@main
       env:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-request.zip
-        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
+        asset_name: origin-request.test-build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
         asset_content_type: application/octet-stream
-    - uses: actions/upload-release-asset@v1
+    - uses: actions/upload-release-asset@main
       env:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-response.zip
-        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
+        asset_name: origin-response.test-build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
         asset_content_type: application/octet-stream
-    - uses: aws-actions/configure-aws-credentials@v2
+    - uses: aws-actions/configure-aws-credentials@main
       with:
         aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
         aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
         aws-region: us-east-1
-    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
-    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.9.zip
+    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
