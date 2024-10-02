@@ -29,7 +29,7 @@ jobs:
       with:
         python-version: '~${{env.PYTHON_VERSION}}'
     - name: Python Poetry Action
-      uses: abatilo/actions-poetry@main
+      uses: abatilo/actions-poetry@master
     - run: script/recreate-venv
     - name: Generate build number
       uses: onyxmueller/build-tag-number@main
