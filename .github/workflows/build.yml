@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
     - master
-    - issue/*
   push:
     branches:
     - master
@@ -91,7 +90,7 @@ jobs:
     needs:
     - build
     - test
-    if: github.ref == 'refs/heads/issue/24'
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/download-artifact@main
@@ -117,7 +116,7 @@ jobs:
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-request.zip
-        asset_name: origin-request.test-build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
         asset_content_type: application/octet-stream
     - uses: actions/upload-release-asset@main
       env:
@@ -125,7 +124,7 @@ jobs:
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-response.zip
-        asset_name: origin-response.test-build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
         asset_content_type: application/octet-stream
     - uses: aws-actions/configure-aws-credentials@main
       with:
