@@ -2,7 +2,7 @@
 name = "gutenberg-imglambda-originrequest"
 version = "0.1.0"
 description = ""
-authors = ["Akihiro Harai <mail@harai.click>"]
+authors = ["Akihiro Harai <akihiro.harai@tarosky.co.jp>"]
 package-mode = false
 license = "MIT"
 
