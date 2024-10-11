@@ -27,7 +27,6 @@ CSS_MIME = 'text/css'
 GIF_MIME = 'image/gif'
 JPEG_MIME = 'image/jpeg'
 PNG_MIME = 'image/png'
-SOURCEMAP_MIME = 'application/octet-stream'
 WEBP_MIME = "image/webp"
 
 CSS_NAME = 'スタイル.css'
