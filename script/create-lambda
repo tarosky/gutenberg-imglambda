@@ -11,7 +11,7 @@ package_lambda () {
   rm -fr "$zip"
   mkdir -p "$dest"
   rsync -r --delete --exclude=__pycache__ \
-    "$src/.venv/lib/python3.11/site-packages/" "$dest"
+    "$src/.venv/lib/python3.13/site-packages/" "$dest"
   rsync -r --exclude=__pycache__ --exclude=.venv --exclude='test_*.py' \
     "$src/" "$dest"
 

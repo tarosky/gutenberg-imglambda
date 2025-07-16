@@ -17,7 +17,7 @@ env:
   TEST_ACCESS_KEY_ID: AKIAQGFE5ESVKGVB3XGS
   TEST_GENERATED_BUCKET: gutenberg-ext-imglambda-testgeneratedbucket-n8c79jl0mzd2
   TEST_ORIGINAL_BUCKET: gutenberg-ext-imglambda-testoriginalbucket-fz28m8cblu5t
-  PYTHON_VERSION: 3.11.10
+  PYTHON_VERSION: 3.13.5
 
 jobs:
   build:
@@ -116,7 +116,7 @@ jobs:
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-request.zip
-        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
         asset_content_type: application/octet-stream
     - uses: actions/upload-release-asset@main
       env:
@@ -124,12 +124,12 @@ jobs:
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./origin-response.zip
-        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
         asset_content_type: application/octet-stream
     - uses: aws-actions/configure-aws-credentials@main
       with:
         aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
         aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
         aws-region: us-east-1
-    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
-    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.11.zip
+    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
+    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
