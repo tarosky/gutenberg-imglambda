@@ -14,18 +14,24 @@ import boto3
 from botocore.exceptions import ClientError
 from dateutil import parser, tz
 from mypy_boto3_s3.client import S3Client
+from mypy_boto3_s3.type_defs import HeadObjectOutputTypeDef
 from mypy_boto3_sqs.client import SQSClient
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
 TIMESTAMP_METADATA = 'original-timestamp'
+OPTIMIZE_TYPE_METADATA = 'optimize-type'
+OPTIMIZE_QUALITY_METADATA = 'optimize-quality'
 HEADERS = 'headers'
 EXPIRATION = 'Expiration'
 MESSAGE = 'message'
 VALUE = 'value'
 
 LAMBDA_EXPIRATION_MARGIN = 60
+
+WEBP_EXTENSION = '.webp'
+AVIF_EXTENSION = '.avif'
 
 image_exts = set([
     '.jpg',
@@ -37,10 +43,6 @@ image_exts = set([
 long_exts = [
     '.min.css',
 ]
-
-minifiable_exts = set([
-    '.css',
-])
 
 expiration_re = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
 
@@ -65,8 +67,7 @@ class MyJsonFormatter(JsonFormatter):
     super().__init__(json_ensure_ascii=False)
 
   def add_fields(self, log_record: Any, record: Any, message_dict: Any) -> None:
-    log_record['_ts'] = datetime.datetime.now(datetime.UTC).strftime(
-        '%Y-%m-%dT%H:%M:%S.%fZ')
+    log_record['_ts'] = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
     if log_record.get('level'):
       log_record['level'] = log_record['level'].upper()
@@ -128,7 +129,7 @@ class XParams:
   basedir: str
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class Location:
   path: str
   key: str
@@ -136,8 +137,7 @@ class Location:
   gen_key: str
 
   @classmethod
-  def from_path(
-      cls, path: str, gen_prefix: str, gen_postfix: str) -> 'Location':
+  def from_path(cls, path: str, gen_prefix: str, gen_postfix: str) -> 'Location':
     key = parse.unquote(path[1:])
     return cls(
         path=path,
@@ -152,6 +152,57 @@ class Location:
         'gen_path': self.gen_path,
         'gen_key': self.gen_key,
     }
+
+
+@dataclasses.dataclass(frozen=True)
+class ObjectMeta:
+  last_modified: datetime.datetime
+  metadata_optimize_type: Optional[str]
+  metadata_optimize_quality: Optional[str]
+
+  @classmethod
+  def from_object(cls, obj: HeadObjectOutputTypeDef) -> 'ObjectMeta':
+    return cls(
+      last_modified=obj['LastModified'],
+      metadata_optimize_type=obj['Metadata'].get(OPTIMIZE_TYPE_METADATA),
+      metadata_optimize_quality=obj['Metadata'].get(OPTIMIZE_QUALITY_METADATA))
+
+  @classmethod
+  def from_generated_object(cls, obj: HeadObjectOutputTypeDef) -> 'ObjectMeta':
+    return cls(
+      last_modified=parser.parse(obj['Metadata'][TIMESTAMP_METADATA]),
+      metadata_optimize_type=obj['Metadata'].get(OPTIMIZE_TYPE_METADATA),
+      metadata_optimize_quality=obj['Metadata'].get(OPTIMIZE_QUALITY_METADATA))
+
+
+@dataclasses.dataclass(frozen=True)
+class ImageLocation:
+  path: str
+  key: str
+  gen_prefix: str
+  gen_path_prefix: str
+  gen_key_prefix: str
+
+  @classmethod
+  def from_path(cls, path: str, gen_prefix: str) -> 'Location':
+    key = parse.unquote(path[1:])
+    return cls(
+        path=path,
+        key=key,
+        gen_prefix=gen_prefix,
+        gen_path_prefix=f'/{gen_prefix}{path[1:]}',
+        gen_key_prefix=f'{gen_prefix}{key}')
+
+  def as_dict(self) -> Dict[str, str]:
+    return {
+        'path': self.path,
+        'key': self.key,
+        'gen_path_prefix': self.gen_path_prefix,
+        'gen_key_prefix': self.gen_key_prefix,
+    }
+
+  def get_location(self, postfix: str) -> Location:
+    return Location.from_path(self.path, self.gen_prefix, postfix)
 
 
 def json_dump(obj: Any) -> str:
@@ -171,9 +222,7 @@ def get_header(req: Dict[str, Any], name: str) -> str:
 
 
 def get_header_or(req: Dict[str, Any], name: str, default: str = '') -> str:
-  return (
-      get_header(req, name)
-      if name in req['origin']['s3']['customHeaders'] else default)
+  return (get_header(req, name) if name in req['origin']['s3']['customHeaders'] else default)
 
 
 def get_normalized_extension(path: str) -> str:
@@ -235,8 +284,7 @@ class ImgServer:
       sqs_queue_url: str = get_header(req, 'x-env-sqs-queue-url')
       perm_resp_max_age: int = int(get_header(req, 'x-env-perm-resp-max-age'))
       temp_resp_max_age: int = int(get_header(req, 'x-env-temp-resp-max-age'))
-      bypass_minifier_patterns: str = get_header_or(
-          req, 'x-env-bypass-minifier-patterns')
+      bypass_minifier_patterns: str = get_header_or(req, 'x-env-bypass-minifier-patterns')
       basedir: str = get_header_or(req, 'x-env-basedir')
     except KeyError as e:
       log.warning({
@@ -292,14 +340,16 @@ class ImgServer:
     update.res_cache_control_overridable = 'true'
     return update
 
-  def origin_as_generated(
-      self, loc: Location, update: FieldUpdate) -> FieldUpdate:
+  def origin_as_generated(self, loc: Location, update: FieldUpdate) -> FieldUpdate:
     update.origin_domain = self.generated_domain
     update.uri = loc.gen_path
     return update
 
   def supports_webp(self, accept_header: str) -> bool:
     return 'image/webp' in accept_header
+
+  def supports_avif(self, accept_header: str) -> bool:
+    return 'image/avif' in accept_header
 
   def get_time_original(self, loc: Location) -> Optional[datetime.datetime]:
     try:
@@ -311,6 +361,15 @@ class ImgServer:
 
     # Return timezone-aware datetime
     return res['LastModified']
+
+  def get_meta_original(self, loc: Location) -> Optional[ObjectMeta]:
+    try:
+      res = self.s3.head_object(Bucket=self.original_bucket, Key=loc.key)
+    except ClientError as e:
+      if is_not_found_client_error(e):
+        return None
+      raise e
+    return ObjectMeta.from_object(res)
 
   def object_expired(
       self,
@@ -339,8 +398,7 @@ class ImgServer:
   ) -> Optional[datetime.datetime]:
     try:
       res = self.s3.head_object(Bucket=self.generated_bucket, Key=loc.gen_key)
-      if 'Expiration' in res and self.object_expired(now, loc,
-                                                     res['Expiration']):
+      if 'Expiration' in res and self.object_expired(now, loc, res['Expiration']):
         self.log.debug(
             {
                 MESSAGE: 'expired object found',
@@ -358,13 +416,40 @@ class ImgServer:
       return None
     return parser.parse(t_str)
 
+  def get_meta_generated(
+      self,
+      now: datetime.datetime,
+      loc: Location,
+  ) -> Optional[ObjectMeta]:
+    try:
+      res = self.s3.head_object(Bucket=self.generated_bucket, Key=loc.gen_key)
+      if 'Expiration' in res and self.object_expired(now, loc, res['Expiration']):
+        self.log.debug(
+            {
+                MESSAGE: 'expired object found',
+                **loc.as_dict(),
+                'expiration': res['Expiration'],
+            })
+        return None
+    except ClientError as e:
+      if is_not_found_client_error(e):
+        return None
+      raise e
+
+    if TIMESTAMP_METADATA not in res['Metadata']:
+      return None
+
+    return ObjectMeta.from_generated_object(res)
+
   def keep_uptodate(
       self,
       loc: Location,
       t_orig: Optional[datetime.datetime],
       t_gen: Optional[datetime.datetime],
+      orig_quality: Optional[str] = None,
+      gen_quality: Optional[str] = None,
   ) -> None:
-    if t_gen == t_orig:
+    if t_gen == t_orig and orig_quality == gen_quality:
       return
 
     body = {
@@ -380,36 +465,116 @@ class ImgServer:
         },
     }
 
-    self.sqs.send_message(
-        QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
+    self.sqs.send_message(QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
     self.log.debug({
         MESSAGE: 'enqueued',
         **loc.as_dict(),
         'body': body,
     })
 
-  def generate_and_respond_with_original(self, loc: Location) -> FieldUpdate:
+  def process_for_original_image_requester(self, path: str) -> FieldUpdate:
+    image_loc = ImageLocation.from_path(path, self.generated_key_prefix)
+
     try:
       now = get_now()
-      t_gen = self.get_time_generated(now, loc)
-      t_orig = self.get_time_original(loc)
 
-      self.keep_uptodate(loc, t_orig, t_gen)
+      orig_meta = self.get_meta_original(image_loc)
 
-      if t_orig is not None:
-        return self.as_permanent(FieldUpdate())
-      return self.as_temporary(FieldUpdate())
+      if orig_meta is None:
+        avif_loc = image_loc.get_location(AVIF_EXTENSION)
+        gen_avif_meta = self.get_meta_generated(now, avif_loc)
+        webp_loc = image_loc.get_location(WEBP_EXTENSION)
+        gen_webp_meta = self.get_meta_generated(now, webp_loc)
+        if gen_avif_meta is not None:
+          self.keep_uptodate(avif_loc, None, gen_avif_meta.last_modified)
+        if gen_webp_meta is not None:
+          self.keep_uptodate(webp_loc, None, gen_webp_meta.last_modified)
+
+        return self.as_temporary(FieldUpdate())
+
+      if orig_meta.metadata_optimize_type == 'avif':
+        loc = image_loc.get_location(AVIF_EXTENSION)
+      else:
+        loc = image_loc.get_location(WEBP_EXTENSION)
+
+      gen_meta = self.get_meta_generated(now, loc)
+      gen_last_modified = None if gen_meta is None else gen_meta.last_modified
+      gen_optimize_quality = None if gen_meta is None else gen_meta.metadata_optimize_quality
+
+      self.keep_uptodate(
+          loc,
+          orig_meta.last_modified,
+          gen_last_modified,
+          orig_meta.metadata_optimize_quality,
+          gen_optimize_quality)
+
+      return self.as_permanent(FieldUpdate())
+
     except Exception as e:
       self.log.error(
           {
-              MESSAGE: 'error during generate_and_respond_with_original()',
-              **loc.as_dict(),
+              MESSAGE: 'error during process_for_original_image_requester()',
+              **image_loc.as_dict(),
               'error': str(e),
           })
       return self.as_permanent(FieldUpdate())
 
-  def res_with_generated_or_generate_and_res_with_original(
-      self, loc: Location) -> FieldUpdate:
+  def process_for_optimized_image_requester(
+      self, path: str, accepts_webp: bool, accepts_avif: bool) -> FieldUpdate:
+    image_loc = ImageLocation.from_path(path, self.generated_key_prefix)
+    try:
+      now = get_now()
+
+      orig_meta = self.get_meta_original(image_loc)
+
+      if orig_meta is None:
+        avif_loc = image_loc.get_location(AVIF_EXTENSION)
+        gen_avif_meta = self.get_meta_generated(now, avif_loc)
+        webp_loc = image_loc.get_location(WEBP_EXTENSION)
+        gen_webp_meta = self.get_meta_generated(now, webp_loc)
+        if gen_avif_meta is not None:
+          self.keep_uptodate(avif_loc, None, gen_avif_meta.last_modified)
+        if gen_webp_meta is not None:
+          self.keep_uptodate(webp_loc, None, gen_webp_meta.last_modified)
+
+        return self.as_temporary(FieldUpdate())
+
+      if orig_meta.metadata_optimize_type == 'avif':
+        loc = image_loc.get_location(AVIF_EXTENSION)
+      else:
+        loc = image_loc.get_location(WEBP_EXTENSION)
+
+      gen_meta = self.get_meta_generated(now, loc)
+      gen_last_modified = None if gen_meta is None else gen_meta.last_modified
+      gen_optimize_quality = None if gen_meta is None else gen_meta.metadata_optimize_quality
+
+      self.keep_uptodate(
+          loc,
+          orig_meta.last_modified,
+          gen_last_modified,
+          orig_meta.metadata_optimize_quality,
+          gen_optimize_quality)
+
+      if orig_meta.last_modified == gen_last_modified and (
+          orig_meta.metadata_optimize_quality == gen_optimize_quality):
+        if orig_meta.metadata_optimize_type == 'avif':
+          if accepts_avif:
+            return self.as_permanent(self.origin_as_generated(loc, FieldUpdate()))
+        else:
+          if accepts_webp:
+            return self.as_permanent(self.origin_as_generated(loc, FieldUpdate()))
+
+      return self.as_temporary(FieldUpdate())
+    except Exception as e:
+      self.log.error(
+          {
+              MESSAGE: 'error during process_for_optimized_image_requester()',
+              **loc.as_dict(),
+              'error': str(e),
+          })
+      return self.as_temporary(FieldUpdate())
+
+  def process_for_css_requester(self, loc: Location) -> FieldUpdate:
     try:
       now = get_now()
       t_gen = self.get_time_generated(now, loc)
@@ -423,55 +588,35 @@ class ImgServer:
     except Exception as e:
       self.log.error(
           {
-              MESSAGE: (
-                  'error during '
-                  'res_with_generated_or_generate_and_res_with_original()'),
+              MESSAGE: 'error during process_for_css_requester()',
               **loc.as_dict(),
               'error': str(e),
           })
       return self.as_temporary(FieldUpdate())
-
-  def res_with_original_or_generated(self, loc: Location) -> FieldUpdate:
-    try:
-      t_orig = self.get_time_original(loc)
-      if t_orig is not None:
-        return self.as_permanent(FieldUpdate())
-      return self.as_permanent(self.origin_as_generated(loc, FieldUpdate()))
-    except Exception as e:
-      self.log.error(
-          {
-              MESSAGE: 'error during res_with_original_or_generated()',
-              **loc.as_dict(),
-              'error': str(e),
-          })
-      return self.as_temporary(FieldUpdate())
-
-  def respond_with_original(self) -> FieldUpdate:
-    return self.as_overridable(self.as_permanent(FieldUpdate()))
 
   def process(self, path: str, accept_header: str) -> FieldUpdate:
 
     def run(path: str):
       if self.bypass_minifier_path_spec is not None and (
           self.bypass_minifier_path_spec.match_file(path)):
-        return self.respond_with_original()
+        return self.as_overridable(self.as_permanent(FieldUpdate()))
 
       ext = get_normalized_extension(path)
 
       if ext in image_exts:
-        if self.supports_webp(accept_header):
-          return self.res_with_generated_or_generate_and_res_with_original(
-              Location.from_path(path, self.generated_key_prefix, '.webp'))
+        accepts_webp = self.supports_webp(accept_header)
+        accepts_avif = self.supports_avif(accept_header)
+        if accepts_webp or accepts_avif:
+          return self.process_for_optimized_image_requester(path, accepts_webp, accepts_avif)
         else:
-          return self.generate_and_respond_with_original(
-              Location.from_path(path, self.generated_key_prefix, '.webp'))
-      elif ext in minifiable_exts:
-        return self.res_with_generated_or_generate_and_res_with_original(
+          return self.process_for_original_image_requester(path)
+      elif ext == '.css':
+        return self.process_for_css_requester(
             Location.from_path(path, self.generated_key_prefix, ''))
       else:
         # This condition includes:
         #   '.min.css'
-        return self.respond_with_original()
+        return self.as_overridable(self.as_permanent(FieldUpdate()))
 
     if self.basedir != '':
       if not path.startswith(self.basedir):
@@ -493,8 +638,7 @@ class ImgServer:
 
 def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
   req: Dict[str, Any] = event['Records'][0]['cf']['request']
-  accept_header: str = (
-      req[HEADERS]['accept'][0][VALUE] if 'accept' in req[HEADERS] else '')
+  accept_header: str = (req[HEADERS]['accept'][0][VALUE] if 'accept' in req[HEADERS] else '')
 
   # Set default value
   req[HEADERS]['x-res-cache-control'] = [{VALUE: ''}]

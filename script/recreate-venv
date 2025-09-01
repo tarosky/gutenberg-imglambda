@@ -1,4 +1,4 @@
 #!/bin/bash -eu
 
-poetry install -C src/origin-request --sync
-poetry install -C src/origin-response --sync
+poetry sync -C src/origin-request
+poetry sync -C src/origin-response

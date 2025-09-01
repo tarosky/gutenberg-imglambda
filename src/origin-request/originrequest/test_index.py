@@ -16,7 +16,7 @@ from mypy_boto3_sqs.type_defs import MessageTypeDef
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 
-from .index import TIMESTAMP_METADATA, FieldUpdate, ImgServer, MyJsonFormatter
+from .index import AVIF_EXTENSION, OPTIMIZE_QUALITY_METADATA, OPTIMIZE_TYPE_METADATA, TIMESTAMP_METADATA, WEBP_EXTENSION, FieldUpdate, ImgServer, MyJsonFormatter
 
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
 TEMP_RESP_MAX_AGE = 20 * 60
@@ -28,6 +28,7 @@ GIF_MIME = 'image/gif'
 JPEG_MIME = 'image/jpeg'
 PNG_MIME = 'image/png'
 WEBP_MIME = "image/webp"
+AVIF_MIME = "image/avif"
 
 CSS_NAME = 'スタイル.css'
 CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.css'
@@ -36,6 +37,7 @@ JPG_NAME_U = 'image.JPG'
 JPG_NAME_MB = 'テスト.jpg'
 JPG_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg'
 JPG_WEBP_NAME = 'image.jpg.webp'
+JPG_AVIF_NAME = 'image.jpg.avif'
 JPG_WEBP_NAME_U = 'image.JPG.webp'
 JPG_WEBP_NAME_MB = 'テスト.jpg.webp'
 JPG_WEBP_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg.webp'
@@ -129,6 +131,7 @@ def put_original(
     key: str,
     name: str,
     mime: str,
+    metadata: dict[str, str] = {},
 ) -> datetime.datetime:
   path = f'{os.getcwd()}/../../samplefile/original/{name}'
   with open(path, 'rb') as f:
@@ -137,6 +140,7 @@ def put_original(
         Bucket=img_server.original_bucket,
         ContentType=mime,
         Key=key,
+        Metadata=metadata,
     )
 
   return get_original_object_time(img_server, key)
@@ -148,11 +152,12 @@ def put_generated(
     name: str,
     mime: str,
     timestamp: Optional[datetime.datetime] = None,
+    metadata: dict[str, str] = {},
 ) -> None:
   path = f'{os.getcwd()}/../../samplefile/generated/{name}'
-  metadata = {}
+  metadata2 = {}
   if timestamp is not None:
-    metadata[TIMESTAMP_METADATA] = timestamp.astimezone(
+    metadata2[TIMESTAMP_METADATA] = timestamp.astimezone(
         pytz.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
   with open(path, 'rb') as f:
     img_server.s3.put_object(
@@ -160,7 +165,10 @@ def put_generated(
         Bucket=img_server.generated_bucket,
         ContentType=mime,
         Key=key,
-        Metadata=metadata)
+        Metadata={
+          **metadata2,
+          **metadata,
+        })
 
 
 def get_original_object_time(
@@ -213,16 +221,20 @@ class BaseTestCase(TestCase):
   def get_basedir(self) -> str:
     return ''
 
-  def put_original(self, name: str, mime: str) -> datetime.datetime:
+  def put_original(
+      self, name: str, mime: str, metadata: dict[str, str] = {}) -> datetime.datetime:
     return put_original(
-        self._img_server, f'{self._key_prefix}{name}', name, mime)
+        self._img_server, f'{self._key_prefix}{name}', name, mime, metadata)
 
   def put_generated(
-      self, name: str, mime: str,
-      timestamp: Optional[datetime.datetime]) -> None:
+      self, name: str,
+      mime: str,
+      timestamp: Optional[datetime.datetime],
+      metadata: dict[str, str] = {},
+    ) -> None:
     key = f'{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
 
-    put_generated(self._img_server, key, name, mime, timestamp)
+    put_generated(self._img_server, key, name, mime, timestamp, metadata)
 
   def receive_sqs_message(self) -> Optional[Dict[str, Any]]:
     return receive_sqs_message(self._img_server)
@@ -262,7 +274,7 @@ class ImgserverBasedirTestCase(BaseTestCase):
 
   def test_generated(self) -> None:
     ts = self.put_original(JPG_NAME, JPEG_MIME)
-    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+    self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
 
     update = self._img_server.process(
         f'/blog{self.to_path(JPG_NAME)}', CHROME_ACCEPT_HEADER)
@@ -286,7 +298,7 @@ class ImgserverBasedirTestCase(BaseTestCase):
 
   def test_no_basedir_generated(self) -> None:
     ts = self.put_original(JPG_NAME, JPEG_MIME)
-    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+    self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
 
     update = self._img_server.process(
         self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
@@ -305,7 +317,7 @@ class ImgserverExpiredTestCase(BaseTestCase):
 
   def test_jpg_accepted_gen_orig(self) -> None:
     ts = self.put_original(JPG_NAME, JPEG_MIME)
-    self.put_generated(JPG_WEBP_NAME, JPEG_MIME, ts)
+    self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
 
     update = self._img_server.process(
         self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
@@ -317,29 +329,46 @@ class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGAcceptedS3EFS_L
   def test_jpg_accepted_gen_orig_l(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
+    self.jpg_accepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
 
   # Test_JPGAcceptedS3EFS_U
   def test_jpg_accepted_gen_orig_u(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
 
   # Test_JPGAcceptedS3EFS_MB
   def test_jpg_accepted_gen_orig_mb(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
+    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
+
+  def test_jpg_accepted_gen_orig_avif(self) -> None:
+    self.jpg_accepted_gen_orig(
+        JPG_AVIF_NAME,
+        JPG_NAME,
+        JPG_NAME,
+        AVIF_MIME,
+        AVIF_EXTENSION,
+        {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'},
+        {OPTIMIZE_QUALITY_METADATA: '60'})
 
   # JPGAcceptedS3EFS
   def jpg_accepted_gen_orig(
-      self, gen_name: str, orig_name: str, path_name: str) -> None:
-    ts = self.put_original(orig_name, JPEG_MIME)
-    self.put_generated(gen_name, JPEG_MIME, ts)
+      self,
+      gen_name: str,
+      orig_name: str,
+      path_name: str,
+      gen_mime: str,
+      expected_extension: str = WEBP_EXTENSION,
+      orig_metadata: dict[str, str] = {},
+      gen_metadata: dict[str, str] = {},
+  ) -> None:
+    ts = self.put_original(orig_name, JPEG_MIME, orig_metadata)
+    self.put_generated(gen_name, gen_mime, ts, gen_metadata)
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
             origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(f'{path_name}.webp'),
+            uri=self.to_uri(f'{path_name}{expected_extension}'),
         ), update)
     self.assert_no_sqs_message()
 
@@ -348,30 +377,54 @@ class ImgserverTestCase(BaseTestCase):
   # Test_PublicContentJPG
 
   # Test_JPGAcceptedS3NoEFS_L
-  def test_jpg_accepted_gen_no_orig_l(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
+  def test_jpg_accepted_gen_no_orig_l_webp(self) -> None:
+    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
+
+  def test_jpg_accepted_gen_no_orig_l_avif(self) -> None:
+    self.jpg_accepted_gen_no_orig(JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME)
 
   # Test_JPGAcceptedS3NoEFS_U
   def test_jpg_accepted_gen_no_orig_u(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
 
   # Test_JPGAcceptedS3NoEFS_MB
   def test_jpg_accepted_gen_no_orig_mb(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
+    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
 
   # JPGAcceptedS3NoEFS
   def jpg_accepted_gen_no_orig(
-      self, gen_name: str, orig_name: str, path_name: str) -> None:
-    self.put_generated(gen_name, JPEG_MIME, DUMMY_DATETIME)
+      self,
+      gen_name: str,
+      orig_name: str,
+      path_name: str,
+      gen_mime: str,
+      gen_metadata: dict[str, str] = {},
+  ) -> None:
+    self.put_generated(gen_name, gen_mime, DUMMY_DATETIME, gen_metadata)
 
     update = self._img_server.process(
         self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(orig_name)
 
+  def test_jpg_accepted_quality_mismatch(self) -> None:
+    ts = self.put_original(
+        JPG_NAME, JPEG_MIME, {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'})
+    self.put_generated(JPG_AVIF_NAME, AVIF_MIME, ts, {OPTIMIZE_QUALITY_METADATA: '50'})
+
+    update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
+    self.assert_sqs_message(JPG_NAME)
+
   # Test_JPGAcceptedNoS3EFS_L
   def test_jpg_accepted_no_gen_orig_l(self) -> None:
     self.jpg_accepted_no_gen_orig(JPG_NAME, JPG_NAME)
+
+  def test_jpg_accepted_no_gen_orig_avif(self) -> None:
+    self.jpg_accepted_no_gen_orig(
+      JPG_NAME,
+      JPG_NAME,
+      {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'})
 
   # Test_JPGAcceptedNoS3EFS_U
   def test_jpg_accepted_no_gen_orig_u(self) -> None:
@@ -382,8 +435,9 @@ class ImgserverTestCase(BaseTestCase):
     self.jpg_accepted_no_gen_orig(JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGAcceptedNoS3EFS
-  def jpg_accepted_no_gen_orig(self, orig_name: str, path_name: str) -> None:
-    self.put_original(orig_name, JPEG_MIME)
+  def jpg_accepted_no_gen_orig(
+      self, orig_name: str, path_name: str, metadata: dict[str, str] = {}) -> None:
+    self.put_original(orig_name, JPEG_MIME, metadata)
 
     update = self._img_server.process(
         self.to_path(path_name), CHROME_ACCEPT_HEADER)
@@ -411,21 +465,37 @@ class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGUnacceptedS3EFS_L
   def test_jpg_unaccepted_gen_orig_l(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
+    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
+
+  def test_jpg_unaccepted_gen_orig_avif(self) -> None:
+    self.jpg_unaccepted_gen_orig(
+      JPG_AVIF_NAME,
+      JPG_NAME,
+      JPG_NAME,
+      AVIF_MIME,
+      {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'},
+      {OPTIMIZE_QUALITY_METADATA: '60'})
 
   # Test_JPGUnacceptedS3EFS_U
   def test_jpg_unaccepted_gen_orig_u(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
 
   # Test_JPGUnacceptedS3EFS_MB
   def test_jpg_unaccepted_gen_orig_mb(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
+    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
 
   # JPGUnacceptedS3EFS
   def jpg_unaccepted_gen_orig(
-      self, gen_name: str, orig_name: str, path_name: str) -> None:
-    ts = self.put_original(orig_name, JPEG_MIME)
-    self.put_generated(gen_name, JPEG_MIME, ts)
+      self,
+      gen_name: str,
+      orig_name: str,
+      path_name: str,
+      gen_mime: str,
+      orig_metadata: dict[str, str] = {},
+      gen_metadata: dict[str, str] = {},
+  ) -> None:
+    ts = self.put_original(orig_name, JPEG_MIME, orig_metadata)
+    self.put_generated(gen_name, gen_mime, ts, gen_metadata)
 
     update = self._img_server.process(
         self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
@@ -434,21 +504,24 @@ class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGUnacceptedS3NoEFS_L
   def test_jpg_unaccepted_gen_no_orig_l(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
+    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
+
+  def test_jpg_unaccepted_gen_no_orig_avif(self) -> None:
+    self.jpg_unaccepted_gen_no_orig(JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME)
 
   # Test_JPGUnacceptedS3NoEFS_U
   def test_jpg_unaccepted_gen_no_orig_u(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
+    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
 
   # Test_JPGUnacceptedS3NoEFS_MB
   def test_jpg_unaccepted_gen_no_orig_mb(self) -> None:
     self.jpg_unaccepted_gen_no_orig(
-        JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
+        JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
 
   # JPGUnacceptedS3NoEFS
   def jpg_unaccepted_gen_no_orig(
-      self, gen_name: str, orig_name: str, path_name: str) -> None:
-    self.put_generated(gen_name, JPEG_MIME, DUMMY_DATETIME)
+      self, gen_name: str, orig_name: str, path_name: str, gen_mime: str) -> None:
+    self.put_generated(gen_name, gen_mime, DUMMY_DATETIME)
 
     update = self._img_server.process(
         self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
