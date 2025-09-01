@@ -46,3 +46,4 @@ dedent_closing_brackets = false
 indent_width = 2
 allow_split_before_dict_value = false
 indent_dictionary_value = false
+column_limit = 100

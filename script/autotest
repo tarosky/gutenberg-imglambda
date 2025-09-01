@@ -3,5 +3,5 @@
 exclude_file='^\./(\.git|work|\.venv|temp|\.mypy_cache)|__pycache__|\.tmp'
 bash_command="inotifywait -e close_write --exclude '$exclude_file' -m -r ./ | python script/watch.py"
 
-poetry install --sync
+poetry sync
 poetry run bash -c "$bash_command"
