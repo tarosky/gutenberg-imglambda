@@ -6,7 +6,6 @@ import os
 import re
 import sys
 from logging import Logger
-from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib import parse
 
@@ -20,13 +19,15 @@ from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
+import imglambda
+from imglambda.typing import OriginRequestEvent, Request
+
 TIMESTAMP_METADATA = 'original-timestamp'
 OPTIMIZE_TYPE_METADATA = 'optimize-type'
 OPTIMIZE_QUALITY_METADATA = 'optimize-quality'
-HEADERS = 'headers'
-EXPIRATION = 'Expiration'
 MESSAGE = 'message'
-VALUE = 'value'
+OVERRIDABLE = 'x-res-cache-control-overridable'
+CACHE_CONTROL = 'x-res-cache-control'
 
 LAMBDA_EXPIRATION_MARGIN = 60
 
@@ -49,13 +50,6 @@ expiration_re = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
 API_VERSION = 2
 
 
-def get_version() -> str:
-  return Path(__file__).parent.resolve().with_name('VERSION').read_text().strip()
-
-
-version = get_version()
-
-
 def get_now() -> datetime.datetime:
   # Return timezone-aware datetime
   return datetime.datetime.now(tz=tz.tzutc())
@@ -74,7 +68,7 @@ class MyJsonFormatter(JsonFormatter):
     else:
       log_record['level'] = record.levelname
 
-    log_record['version'] = version
+    log_record['version'] = imglambda.version
 
     super().add_fields(log_record, record, message_dict)
 
@@ -184,7 +178,7 @@ class ImageLocation:
   gen_key_prefix: str
 
   @classmethod
-  def from_path(cls, path: str, gen_prefix: str) -> 'Location':
+  def from_path(cls, path: str, gen_prefix: str) -> 'ImageLocation':
     key = parse.unquote(path[1:])
     return cls(
         path=path,
@@ -217,11 +211,11 @@ def is_not_found_client_error(exception: ClientError) -> bool:
   return exception.response['Error']['Code'] == '404'
 
 
-def get_header(req: Dict[str, Any], name: str) -> str:
-  return req['origin']['s3']['customHeaders'][name][0][VALUE]
+def get_header(req: Request, name: str) -> str:
+  return req['origin']['s3']['customHeaders'][name][0]['value']
 
 
-def get_header_or(req: Dict[str, Any], name: str, default: str = '') -> str:
+def get_header_or(req: Request, name: str, default: str = '') -> str:
   return (get_header(req, name) if name in req['origin']['s3']['customHeaders'] else default)
 
 
@@ -272,7 +266,7 @@ class ImgServer:
   def from_lambda(
       cls,
       log: Logger,
-      req: Dict[str, Any],
+      req: Request,
   ) -> Optional['ImgServer']:
     expiration_margin: int = LAMBDA_EXPIRATION_MARGIN
 
@@ -362,9 +356,9 @@ class ImgServer:
     # Return timezone-aware datetime
     return res['LastModified']
 
-  def get_meta_original(self, loc: Location) -> Optional[ObjectMeta]:
+  def get_meta_original(self, key: str) -> Optional[ObjectMeta]:
     try:
-      res = self.s3.head_object(Bucket=self.original_bucket, Key=loc.key)
+      res = self.s3.head_object(Bucket=self.original_bucket, Key=key)
     except ClientError as e:
       if is_not_found_client_error(e):
         return None
@@ -478,7 +472,7 @@ class ImgServer:
     try:
       now = get_now()
 
-      orig_meta = self.get_meta_original(image_loc)
+      orig_meta = self.get_meta_original(image_loc.key)
 
       if orig_meta is None:
         avif_loc = image_loc.get_location(AVIF_EXTENSION)
@@ -525,7 +519,7 @@ class ImgServer:
     try:
       now = get_now()
 
-      orig_meta = self.get_meta_original(image_loc)
+      orig_meta = self.get_meta_original(image_loc.key)
 
       if orig_meta is None:
         avif_loc = image_loc.get_location(AVIF_EXTENSION)
@@ -636,13 +630,13 @@ class ImgServer:
     return fu
 
 
-def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
-  req: Dict[str, Any] = event['Records'][0]['cf']['request']
-  accept_header: str = (req[HEADERS]['accept'][0][VALUE] if 'accept' in req[HEADERS] else '')
+def lambda_main(event: OriginRequestEvent) -> Request:
+  req = event['Records'][0]['cf']['request']
+  accept_header = req['headers']['accept'][0]['value'] if 'accept' in req['headers'] else ''
 
   # Set default value
-  req[HEADERS]['x-res-cache-control'] = [{VALUE: ''}]
-  req[HEADERS]['x-res-cache-control-overridable'] = [{VALUE: ''}]
+  req['headers'][CACHE_CONTROL] = [{'value': ''}]
+  req['headers'][OVERRIDABLE] = [{'value': ''}]
 
   server = ImgServer.from_lambda(logger, req)
   if server is None:
@@ -653,22 +647,22 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
 
   if field_update.origin_domain is not None:
     req['origin']['s3']['domainName'] = field_update.origin_domain
-    req[HEADERS]['host'][0][VALUE] = field_update.origin_domain
+    req['headers']['host'][0]['value'] = field_update.origin_domain
 
   if field_update.uri is not None:
     req['uri'] = field_update.uri
 
   if field_update.res_cache_control is not None:
-    req[HEADERS]['x-res-cache-control'] = [
+    req['headers'][CACHE_CONTROL] = [
         {
-            VALUE: field_update.res_cache_control,
+            'value': field_update.res_cache_control,
         },
     ]
 
   if field_update.res_cache_control_overridable is not None:
-    req[HEADERS]['x-res-cache-control-overridable'] = [
+    req['headers'][OVERRIDABLE] = [
         {
-            VALUE: field_update.res_cache_control_overridable,
+            'value': field_update.res_cache_control_overridable,
         },
     ]
 
@@ -679,9 +673,8 @@ def lambda_main(event: Dict[str, Any]) -> Dict[str, Any]:
           'uri': req['uri'],
           'accept_header': accept_header,
           'origin_domain': req['origin']['s3']['domainName'],
-          'res_cache_control': req[HEADERS]['x-res-cache-control'][0][VALUE],
-          'res_cache_control_overridable': (
-              req[HEADERS]['x-res-cache-control-overridable'][0][VALUE]),
+          'res_cache_control': req['headers'][CACHE_CONTROL][0]['value'],
+          'res_cache_control_overridable': req['headers'][OVERRIDABLE][0]['value'],
       })
 
   return req

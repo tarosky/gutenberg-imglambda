@@ -1,0 +1,8 @@
+#!/bin/bash -eu
+
+poetry sync
+
+mkdir -p work/release-venv
+cp poetry.lock poetry.toml pyproject.toml work/release-venv
+pushd work/release-venv
+VIRTUAL_ENV='' poetry sync --without=dev
