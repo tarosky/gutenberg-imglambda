@@ -1,35 +1,30 @@
-#!/bin/bash -eu
+#!/bin/bash -eux
 
 package_lambda () {
-  local -r side="$1"
-  local -r flow="$2"
-  local -r cwd="$(pwd)"
-  local -r src="$cwd/src/$side-$flow"
-  local -r dest="$cwd/work/$side-$flow"
-  local -r zip="$cwd/work/$side-$flow.zip"
+  local -r dest=work/imglambda
 
-  rm -fr "$zip"
+  rm -fr work/imglambda.zip "$dest"
   mkdir -p "$dest"
-  rsync -r --delete --exclude=__pycache__ \
-    "$src/.venv/lib/python3.13/site-packages/" "$dest"
-  rsync -r --exclude=__pycache__ --exclude=.venv --exclude='test_*.py' \
-    "$src/" "$dest"
+  rsync -r --delete \
+    --exclude=__pycache__ \
+    --exclude='test_*.py' \
+    --exclude=/pip \
+    --exclude='/pip-*' \
+    work/release-venv/.venv/lib/python3.13/site-packages/ \
+    index.py \
+    VERSION \
+    imglambda \
+    "$dest"
 
-  cd "$dest"
+  pushd "$dest"
   local -r digest="$(find . -type f -exec md5sum {} \; | sort -k 2 | md5sum | cut -f1 -d' ')"
-  cd "$cwd"
+  zip -q -r ../imglambda.zip .
+  popd
 
-  local -r alt_zip="$cwd/work/development/$side-$flow.$digest.zip"
-
-  cd "$dest"
-  zip -q -r "$zip" .
-  cd "$cwd"
-
-  cp "$zip" "$alt_zip"
+  cp work/imglambda.zip "work/development/imglambda.$digest.zip"
 }
 
 mkdir -p work/development/
 rm -f work/development/*
 
-package_lambda origin request
-package_lambda origin response
+package_lambda

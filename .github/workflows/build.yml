@@ -29,7 +29,7 @@ jobs:
         python-version: '~${{env.PYTHON_VERSION}}'
     - name: Python Poetry Action
       uses: abatilo/actions-poetry@master
-    - run: script/recreate-venv
+    - run: script/recreate-release-venv
     - name: Generate build number
       uses: onyxmueller/build-tag-number@main
       with:
@@ -40,16 +40,12 @@ jobs:
     - name: Save the build number
       run: echo "$BUILD_NUMBER" > work/BUILD_NUMBER
     - name: Embed build number into code
-      run: echo "build-$BUILD_NUMBER" > src/origin-request/VERSION
-    - name: Embed build number into code
-      run: echo "build-$BUILD_NUMBER" > src/origin-response/VERSION
+      run: echo "build-$BUILD_NUMBER" > VERSION
     - run: script/create-lambda
     - uses: actions/upload-artifact@main
       with:
         name: artifact
-        path: |
-          work/origin-request.zip
-          work/origin-response.zip
+        path: work/imglambda.zip
         if-no-files-found: error
     - uses: actions/upload-artifact@main
       with:
@@ -77,14 +73,12 @@ jobs:
       env:
         TEST_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
     - run: poetry sync
-      working-directory: src/origin-request
-    - run: poetry run python -m xmlrunner --output-file ../../work/report-origin-request.xml originrequest/test_index.py 2>&1
-      working-directory: src/origin-request
+    - run: poetry run python -m xmlrunner --output-file work/report-imglambda.xml 2>&1
     - name: Publish Unit Test Results
       uses: EnricoMi/publish-unit-test-result-action@master
       if: always()
       with:
-        files: work/report-origin-request.xml
+        files: work/report-imglambda.xml
 
   release:
     needs:
@@ -92,6 +86,10 @@ jobs:
     - test
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
+    env:
+      # Workaround for https://github.com/github/vscode-github-actions/issues/222
+      BUILD_NUMBER: ""
+      ASSET_NAME: ""
     steps:
     - uses: actions/download-artifact@main
       with:
@@ -115,21 +113,12 @@ jobs:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
-        asset_path: ./origin-request.zip
-        asset_name: origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
-        asset_content_type: application/octet-stream
-    - uses: actions/upload-release-asset@main
-      env:
-        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-      with:
-        upload_url: ${{steps.create_release.outputs.upload_url}}
-        asset_path: ./origin-response.zip
-        asset_name: origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
+        asset_path: ./imglambda.zip
+        asset_name: imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
         asset_content_type: application/octet-stream
     - uses: aws-actions/configure-aws-credentials@main
       with:
         aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
         aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
         aws-region: us-east-1
-    - run: aws s3 cp ./origin-request.zip s3://${{env.REPO_BUCKET}}/origin-request.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
-    - run: aws s3 cp ./origin-response.zip s3://${{env.REPO_BUCKET}}/origin-response.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
+    - run: aws s3 cp ./imglambda.zip s3://${{env.REPO_BUCKET}}/imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip

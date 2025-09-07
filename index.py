@@ -1,0 +1,45 @@
+from aws_lambda_powertools.utilities.typing import LambdaContext
+
+from imglambda import originrequest, originresponse
+from imglambda.typing import (
+    OriginRequestEvent,
+    OriginResponseEvent,
+    Request,
+    Response,
+    ResponseResult
+)
+
+
+def origin_request_lambda_handler(
+    event: OriginRequestEvent,
+    _: LambdaContext,
+) -> Request | ResponseResult:
+  # # For debugging
+  # print('event:')
+  # print(json.dumps(event))
+
+  ret = originrequest.index.lambda_main(event)
+
+  # # For debugging
+  # print('return:')
+  # print(json.dumps(ret))
+
+  return ret
+
+
+def origin_response_lambda_handler(
+    event: OriginResponseEvent,
+    _: LambdaContext,
+) -> Response:
+  # # For debugging
+  # print('event:')
+  # print(json.dumps(event))
+
+  cf = event['Records'][0]['cf']
+  ret = originresponse.index.lambda_main(cf['request'], cf['response'])
+
+  # # For debugging
+  # print('return:')
+  # print(json.dumps(ret))
+
+  return ret

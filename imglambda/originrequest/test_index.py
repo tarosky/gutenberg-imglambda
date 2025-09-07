@@ -1,7 +1,6 @@
 import datetime
 import json
 import logging
-import os
 import secrets
 import time
 import warnings
@@ -11,12 +10,20 @@ from typing import Any, Dict, List, Optional
 from unittest import TestCase
 
 import boto3
-import pytz
 from mypy_boto3_sqs.type_defs import MessageTypeDef
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 
-from .index import AVIF_EXTENSION, OPTIMIZE_QUALITY_METADATA, OPTIMIZE_TYPE_METADATA, TIMESTAMP_METADATA, WEBP_EXTENSION, FieldUpdate, ImgServer, MyJsonFormatter
+from .index import (
+    AVIF_EXTENSION,
+    OPTIMIZE_QUALITY_METADATA,
+    OPTIMIZE_TYPE_METADATA,
+    TIMESTAMP_METADATA,
+    WEBP_EXTENSION,
+    FieldUpdate,
+    ImgServer,
+    MyJsonFormatter
+)
 
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
 TEMP_RESP_MAX_AGE = 20 * 60
@@ -48,8 +55,7 @@ MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
 CHROME_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-OLD_SAFARI_ACCEPT_HEADER = (
-    'image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5')
+OLD_SAFARI_ACCEPT_HEADER = ('image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5')
 
 CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
 CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
@@ -62,7 +68,7 @@ def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
 
 
 def read_test_config(name: str) -> str:
-  path = f'{os.getcwd()}/../../config/test/{name}'
+  path = f'config/test/{name}'
   with open(path, 'r') as f:
     return f.read().strip()
 
@@ -72,8 +78,7 @@ def generate_safe_random_string() -> str:
 
 
 def create_img_server(
-    log: Logger, name: str, expiration_margin: int, key_prefix: str,
-    basedir: str) -> ImgServer:
+    log: Logger, name: str, expiration_margin: int, key_prefix: str, basedir: str) -> ImgServer:
   account_id = read_test_config('aws-account-id')
   sqs_name = f'test-{name}-{generate_safe_random_string()}'
 
@@ -81,8 +86,7 @@ def create_img_server(
       aws_access_key_id=read_test_config('access-key-id'),
       aws_secret_access_key=read_test_config('secret-access-key'))
   # https://github.com/boto/boto3/issues/454#issuecomment-380900404
-  warnings.filterwarnings(
-      'ignore', category=ResourceWarning, message='unclosed.*<ssl.SSLSocket.*>')
+  warnings.filterwarnings('ignore', category=ResourceWarning, message='unclosed.*<ssl.SSLSocket.*>')
   sqs = sess.client('sqs', region_name=REGION)
   s3 = sess.client('s3', region_name=REGION)
 
@@ -94,8 +98,7 @@ def create_img_server(
       generated_domain=f"{read_test_config('generated-bucket')}.s3.example.com",
       original_bucket=read_test_config('original-bucket'),
       generated_key_prefix=GENERATED_KEY_PREFIX,
-      sqs_queue_url=(
-          f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
+      sqs_queue_url=(f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
       perm_resp_max_age=PERM_RESP_MAX_AGE,
       temp_resp_max_age=TEMP_RESP_MAX_AGE,
       bypass_minifier_path_spec=PathSpec.from_lines(
@@ -115,10 +118,8 @@ def create_test_environment(
     key_prefix: str,
     basedir: str,
 ) -> ImgServer:
-  img_server = create_img_server(
-      log, name, expiration_margin, key_prefix, basedir)
-  img_server.sqs.create_queue(
-      QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
+  img_server = create_img_server(log, name, expiration_margin, key_prefix, basedir)
+  img_server.sqs.create_queue(QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
   return img_server
 
 
@@ -133,7 +134,7 @@ def put_original(
     mime: str,
     metadata: dict[str, str] = {},
 ) -> datetime.datetime:
-  path = f'{os.getcwd()}/../../samplefile/original/{name}'
+  path = f'samplefile/original/{name}'
   with open(path, 'rb') as f:
     img_server.s3.put_object(
         Body=f,
@@ -154,11 +155,11 @@ def put_generated(
     timestamp: Optional[datetime.datetime] = None,
     metadata: dict[str, str] = {},
 ) -> None:
-  path = f'{os.getcwd()}/../../samplefile/generated/{name}'
+  path = f'samplefile/generated/{name}'
   metadata2 = {}
   if timestamp is not None:
     metadata2[TIMESTAMP_METADATA] = timestamp.astimezone(
-        pytz.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
   with open(path, 'rb') as f:
     img_server.s3.put_object(
         Body=f,
@@ -166,8 +167,8 @@ def put_generated(
         ContentType=mime,
         Key=key,
         Metadata={
-          **metadata2,
-          **metadata,
+            **metadata2,
+            **metadata,
         })
 
 
@@ -201,7 +202,7 @@ class BaseTestCase(TestCase):
     self._key_prefix = generate_safe_random_string() + '/'
     self._log = logging.getLogger(__name__)
 
-    log_dir = f'{os.getcwd()}/../../work/test/imglambda/{self._key_prefix}'
+    log_dir = f'work/test/imglambda/{self._key_prefix}'
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     self._log_file = open(f'{log_dir}/test.log', 'w')
 
@@ -212,8 +213,7 @@ class BaseTestCase(TestCase):
     self._log.addHandler(log_handler)
 
     self._img_server = create_test_environment(
-        self._log, 'imglambda', self.get_expiration_margin(), self._key_prefix,
-        self.get_basedir())
+        self._log, 'imglambda', self.get_expiration_margin(), self._key_prefix, self.get_basedir())
 
   def get_expiration_margin(self) -> int:
     return 10
@@ -221,17 +221,16 @@ class BaseTestCase(TestCase):
   def get_basedir(self) -> str:
     return ''
 
-  def put_original(
-      self, name: str, mime: str, metadata: dict[str, str] = {}) -> datetime.datetime:
-    return put_original(
-        self._img_server, f'{self._key_prefix}{name}', name, mime, metadata)
+  def put_original(self, name: str, mime: str, metadata: dict[str, str] = {}) -> datetime.datetime:
+    return put_original(self._img_server, f'{self._key_prefix}{name}', name, mime, metadata)
 
   def put_generated(
-      self, name: str,
+      self,
+      name: str,
       mime: str,
       timestamp: Optional[datetime.datetime],
       metadata: dict[str, str] = {},
-    ) -> None:
+  ) -> None:
     key = f'{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
 
     put_generated(self._img_server, key, name, mime, timestamp, metadata)
@@ -276,8 +275,7 @@ class ImgserverBasedirTestCase(BaseTestCase):
     ts = self.put_original(JPG_NAME, JPEG_MIME)
     self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
 
-    update = self._img_server.process(
-        f'/blog{self.to_path(JPG_NAME)}', CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(f'/blog{self.to_path(JPG_NAME)}', CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
@@ -300,8 +298,7 @@ class ImgserverBasedirTestCase(BaseTestCase):
     ts = self.put_original(JPG_NAME, JPEG_MIME)
     self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
 
-    update = self._img_server.process(
-        self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
@@ -319,8 +316,7 @@ class ImgserverExpiredTestCase(BaseTestCase):
     ts = self.put_original(JPG_NAME, JPEG_MIME)
     self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
 
-    update = self._img_server.process(
-        self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(JPG_NAME)
 
@@ -341,13 +337,10 @@ class ImgserverTestCase(BaseTestCase):
 
   def test_jpg_accepted_gen_orig_avif(self) -> None:
     self.jpg_accepted_gen_orig(
-        JPG_AVIF_NAME,
-        JPG_NAME,
-        JPG_NAME,
-        AVIF_MIME,
-        AVIF_EXTENSION,
-        {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'},
-        {OPTIMIZE_QUALITY_METADATA: '60'})
+        JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME, AVIF_EXTENSION, {
+            OPTIMIZE_TYPE_METADATA: 'avif',
+            OPTIMIZE_QUALITY_METADATA: '60'
+        }, {OPTIMIZE_QUALITY_METADATA: '60'})
 
   # JPGAcceptedS3EFS
   def jpg_accepted_gen_orig(
@@ -402,14 +395,16 @@ class ImgserverTestCase(BaseTestCase):
   ) -> None:
     self.put_generated(gen_name, gen_mime, DUMMY_DATETIME, gen_metadata)
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(orig_name)
 
   def test_jpg_accepted_quality_mismatch(self) -> None:
     ts = self.put_original(
-        JPG_NAME, JPEG_MIME, {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'})
+        JPG_NAME, JPEG_MIME, {
+            OPTIMIZE_TYPE_METADATA: 'avif',
+            OPTIMIZE_QUALITY_METADATA: '60'
+        })
     self.put_generated(JPG_AVIF_NAME, AVIF_MIME, ts, {OPTIMIZE_QUALITY_METADATA: '50'})
 
     update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
@@ -422,9 +417,10 @@ class ImgserverTestCase(BaseTestCase):
 
   def test_jpg_accepted_no_gen_orig_avif(self) -> None:
     self.jpg_accepted_no_gen_orig(
-      JPG_NAME,
-      JPG_NAME,
-      {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'})
+        JPG_NAME, JPG_NAME, {
+            OPTIMIZE_TYPE_METADATA: 'avif',
+            OPTIMIZE_QUALITY_METADATA: '60'
+        })
 
   # Test_JPGAcceptedNoS3EFS_U
   def test_jpg_accepted_no_gen_orig_u(self) -> None:
@@ -439,8 +435,7 @@ class ImgserverTestCase(BaseTestCase):
       self, orig_name: str, path_name: str, metadata: dict[str, str] = {}) -> None:
     self.put_original(orig_name, JPEG_MIME, metadata)
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(orig_name)
 
@@ -458,8 +453,7 @@ class ImgserverTestCase(BaseTestCase):
 
   # JPGAcceptedNoS3NoEFS
   def jpg_accepted_no_gen_no_orig(self, path_name: str) -> None:
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
@@ -469,12 +463,10 @@ class ImgserverTestCase(BaseTestCase):
 
   def test_jpg_unaccepted_gen_orig_avif(self) -> None:
     self.jpg_unaccepted_gen_orig(
-      JPG_AVIF_NAME,
-      JPG_NAME,
-      JPG_NAME,
-      AVIF_MIME,
-      {OPTIMIZE_TYPE_METADATA: 'avif', OPTIMIZE_QUALITY_METADATA: '60'},
-      {OPTIMIZE_QUALITY_METADATA: '60'})
+        JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME, {
+            OPTIMIZE_TYPE_METADATA: 'avif',
+            OPTIMIZE_QUALITY_METADATA: '60'
+        }, {OPTIMIZE_QUALITY_METADATA: '60'})
 
   # Test_JPGUnacceptedS3EFS_U
   def test_jpg_unaccepted_gen_orig_u(self) -> None:
@@ -497,8 +489,7 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(orig_name, JPEG_MIME, orig_metadata)
     self.put_generated(gen_name, gen_mime, ts, gen_metadata)
 
-    update = self._img_server.process(
-        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_no_sqs_message()
 
@@ -515,16 +506,14 @@ class ImgserverTestCase(BaseTestCase):
 
   # Test_JPGUnacceptedS3NoEFS_MB
   def test_jpg_unaccepted_gen_no_orig_mb(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(
-        JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
+    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
 
   # JPGUnacceptedS3NoEFS
   def jpg_unaccepted_gen_no_orig(
       self, gen_name: str, orig_name: str, path_name: str, gen_mime: str) -> None:
     self.put_generated(gen_name, gen_mime, DUMMY_DATETIME)
 
-    update = self._img_server.process(
-        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(orig_name)
 
@@ -544,8 +533,7 @@ class ImgserverTestCase(BaseTestCase):
   def jpg_unaccepted_no_gen_orig(self, orig_name: str, path_name: str) -> None:
     self.put_original(orig_name, JPEG_MIME)
 
-    update = self._img_server.process(
-        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
     self.assert_sqs_message(orig_name)
 
@@ -563,8 +551,7 @@ class ImgserverTestCase(BaseTestCase):
 
   # JPGUnacceptedNoS3NoEFS
   def jpg_unaccepted_no_gen_no_orig(self, path_name: str) -> None:
-    update = self._img_server.process(
-        self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
@@ -581,13 +568,11 @@ class ImgserverTestCase(BaseTestCase):
     self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
 
   # JPGAcceptedS3EFSOld
-  def jpg_accepted_gen_orig_old(
-      self, gen_name: str, orig_name: str, path_name: str) -> None:
+  def jpg_accepted_gen_orig_old(self, gen_name: str, orig_name: str, path_name: str) -> None:
     ts = self.put_original(orig_name, JPEG_MIME)
     self.put_generated(gen_name, JPEG_MIME, ts + datetime.timedelta(1))
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(orig_name)
 
@@ -602,8 +587,7 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(CSS_NAME, CSS_MIME)
     self.put_generated(CSS_NAME, CSS_MIME, ts)
 
-    update = self._img_server.process(
-        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(
         FieldUpdate(
             res_cache_control=CACHE_CONTROL_PERM,
@@ -616,8 +600,7 @@ class ImgserverTestCase(BaseTestCase):
   def test_css_gen_no_orig(self) -> None:
     self.put_generated(CSS_NAME, CSS_MIME, DUMMY_DATETIME)
 
-    update = self._img_server.process(
-        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(CSS_NAME)
 
@@ -625,15 +608,13 @@ class ImgserverTestCase(BaseTestCase):
   def test_css_no_gen_orig(self) -> None:
     self.put_original(CSS_NAME, CSS_MIME)
 
-    update = self._img_server.process(
-        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(CSS_NAME)
 
   # Test_CSSNoS3NoEFS
   def test_css_no_gen_no_orig(self) -> None:
-    update = self._img_server.process(
-        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_no_sqs_message()
 
@@ -642,8 +623,7 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(CSS_NAME, CSS_MIME)
     self.put_generated(CSS_NAME, CSS_MIME, ts + datetime.timedelta(1))
 
-    update = self._img_server.process(
-        self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
     self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
     self.assert_sqs_message(CSS_NAME)
 
@@ -656,12 +636,10 @@ class ImgserverTestCase(BaseTestCase):
     ts = self.put_original(key_name, mime)
     self.put_generated(key_name, mime, ts)
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true'), update)
+        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
+        update)
     self.assert_no_sqs_message()
 
   # Test_MinCSSS3NoEFS
@@ -672,12 +650,10 @@ class ImgserverTestCase(BaseTestCase):
   def file_gen_no_orig(self, key_name: str, path_name: str, mime: str) -> None:
     self.put_generated(key_name, mime, DUMMY_DATETIME)
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true'), update)
+        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
+        update)
     self.assert_no_sqs_message()
 
   # Test_MinCSSNoS3EFS
@@ -688,12 +664,10 @@ class ImgserverTestCase(BaseTestCase):
   def file_no_gen_orig(self, key_name: str, path_name: str, mime: str) -> None:
     self.put_original(key_name, mime)
 
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true'), update)
+        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
+        update)
     self.assert_no_sqs_message()
 
   # Test_MinCSSNoS3NoEFS
@@ -702,12 +676,10 @@ class ImgserverTestCase(BaseTestCase):
 
   # FileNoS3NoEFS
   def file_no_gen_no_orig(self, path_name: str) -> None:
-    update = self._img_server.process(
-        self.to_path(path_name), CHROME_ACCEPT_HEADER)
+    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
     self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true'), update)
+        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
+        update)
     self.assert_no_sqs_message()
 
 

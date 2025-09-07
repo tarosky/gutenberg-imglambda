@@ -1,4 +1,0 @@
-#!/bin/bash -eu
-
-poetry sync -C src/origin-request
-poetry sync -C src/origin-response
