@@ -24,6 +24,7 @@ mypy-boto3-builder = "*"
 mypy-boto3-s3 = "*"
 mypy-boto3-sqs = "*"
 pep8 = "*"
+pytest = "*"
 types-python-dateutil = "^2.9.0.20240906"
 unittest-xml-reporting = "^3.2.0"
 yapf = "*"
@@ -31,6 +32,7 @@ yapf = "*"
 # Packages not required on AWS Lambda
 boto3 = "^1.35.29"
 python-dateutil = "^2.9.0"
+ipython = "^9.5.0"
 
 
 [build-system]
