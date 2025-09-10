@@ -73,7 +73,7 @@ jobs:
       env:
         TEST_SECRET_ACCESS_KEY: ${{secrets.TEST_AWS_SECRET_ACCESS_KEY}}
     - run: poetry sync
-    - run: poetry run python -m xmlrunner --output-file work/report-imglambda.xml 2>&1
+    - run: poetry run python -m pytest -s -v --junit-xml=work/report-imglambda.xml 2>&1
     - name: Publish Unit Test Results
       uses: EnricoMi/publish-unit-test-result-action@master
       if: always()

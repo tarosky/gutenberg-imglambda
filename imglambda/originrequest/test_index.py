@@ -1,15 +1,27 @@
 import datetime
 import json
 import logging
+import mimetypes
 import secrets
 import time
 import warnings
+from collections import OrderedDict
 from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from unittest import TestCase
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    NotRequired,
+    Optional,
+    Tuple,
+    TypedDict
+)
 
 import boto3
+import pytest
 from mypy_boto3_sqs.type_defs import MessageTypeDef
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
@@ -55,7 +67,7 @@ MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
 CHROME_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-OLD_SAFARI_ACCEPT_HEADER = ('image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5')
+OLD_SAFARI_ACCEPT_HEADER = 'image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5'
 
 CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
 CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
@@ -98,7 +110,7 @@ def create_img_server(
       generated_domain=f"{read_test_config('generated-bucket')}.s3.example.com",
       original_bucket=read_test_config('original-bucket'),
       generated_key_prefix=GENERATED_KEY_PREFIX,
-      sqs_queue_url=(f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}'),
+      sqs_queue_url=f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}',
       perm_resp_max_age=PERM_RESP_MAX_AGE,
       temp_resp_max_age=TEMP_RESP_MAX_AGE,
       bypass_minifier_path_spec=PathSpec.from_lines(
@@ -111,29 +123,18 @@ def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
   return sqs_queue_url.split('/')[-1]
 
 
-def create_test_environment(
-    log: Logger,
-    name: str,
-    expiration_margin: int,
-    key_prefix: str,
-    basedir: str,
-) -> ImgServer:
-  img_server = create_img_server(log, name, expiration_margin, key_prefix, basedir)
-  img_server.sqs.create_queue(QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
-  return img_server
-
-
 def clean_test_environment(img_server: ImgServer) -> None:
   img_server.sqs.delete_queue(QueueUrl=img_server.sqs_queue_url)
 
 
 def put_original(
     img_server: ImgServer,
-    key: str,
+    key_prefix: str,
     name: str,
     mime: str,
-    metadata: dict[str, str] = {},
+    metadata: dict[str, str],
 ) -> datetime.datetime:
+  key = f'{key_prefix}{name}'
   path = f'samplefile/original/{name}'
   with open(path, 'rb') as f:
     img_server.s3.put_object(
@@ -144,43 +145,36 @@ def put_original(
         Metadata=metadata,
     )
 
-  return get_original_object_time(img_server, key)
+  res = img_server.s3.head_object(Bucket=img_server.original_bucket, Key=key)
+  return res['LastModified']
 
 
 def put_generated(
     img_server: ImgServer,
-    key: str,
+    key_prefix: str,
     name: str,
     mime: str,
-    timestamp: Optional[datetime.datetime] = None,
-    metadata: dict[str, str] = {},
+    timestamp: Optional[datetime.datetime],
+    metadata: dict[str, str],
 ) -> None:
-  path = f'samplefile/generated/{name}'
   metadata2 = {}
   if timestamp is not None:
     metadata2[TIMESTAMP_METADATA] = timestamp.astimezone(
         datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-  with open(path, 'rb') as f:
+
+  with open(f'samplefile/generated/{name}', 'rb') as f:
     img_server.s3.put_object(
         Body=f,
         Bucket=img_server.generated_bucket,
         ContentType=mime,
-        Key=key,
+        Key=f'{img_server.generated_key_prefix}{key_prefix}{name}',
         Metadata={
             **metadata2,
             **metadata,
         })
 
 
-def get_original_object_time(
-    img_server: ImgServer,
-    key: str,
-) -> datetime.datetime:
-  res = img_server.s3.head_object(Bucket=img_server.original_bucket, Key=key)
-  return res['LastModified']
-
-
-def receive_sqs_message(img_server: ImgServer) -> Optional[Dict[str, Any]]:
+def receive_sqs_message(img_server: ImgServer) -> Optional[dict[str, Any]]:
   time.sleep(1.0)
   res = img_server.sqs.receive_message(
       QueueUrl=img_server.sqs_queue_url,
@@ -191,498 +185,898 @@ def receive_sqs_message(img_server: ImgServer) -> Optional[Dict[str, Any]]:
   if msgs is None or len(msgs) == 0 or 'Body' not in msgs[0]:
     return None
 
-  obj: Dict[str, Any] = json.loads(msgs[0]['Body'])
-  return obj
+  return json.loads(msgs[0]['Body'])
 
 
-class BaseTestCase(TestCase):
-  maxDiff = None
+@pytest.fixture
+def key_prefix() -> str:
+  return generate_safe_random_string() + '/'
 
-  def setUp(self) -> None:
-    self._key_prefix = generate_safe_random_string() + '/'
-    self._log = logging.getLogger(__name__)
 
-    log_dir = f'work/test/imglambda/{self._key_prefix}'
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-    self._log_file = open(f'{log_dir}/test.log', 'w')
+@pytest.fixture
+def logger(key_prefix: str) -> Logger:
+  log = logging.getLogger(__name__)
 
-    log_handler = logging.StreamHandler()
-    log_handler.setFormatter(MyJsonFormatter())
-    log_handler.setLevel(logging.DEBUG)
-    log_handler.setStream(self._log_file)
-    self._log.addHandler(log_handler)
+  log_dir = f'work/test/imglambda/{key_prefix}'
+  Path(log_dir).mkdir(parents=True, exist_ok=True)
+  log_file = open(f'{log_dir}/test.log', 'w')
 
-    self._img_server = create_test_environment(
-        self._log, 'imglambda', self.get_expiration_margin(), self._key_prefix, self.get_basedir())
+  log_handler = logging.StreamHandler()
+  log_handler.setFormatter(MyJsonFormatter())
+  log_handler.setLevel(logging.DEBUG)
+  log_handler.setStream(log_file)
+  log.addHandler(log_handler)
 
-  def get_expiration_margin(self) -> int:
-    return 10
+  return log
 
-  def get_basedir(self) -> str:
-    return ''
 
-  def put_original(self, name: str, mime: str, metadata: dict[str, str] = {}) -> datetime.datetime:
-    return put_original(self._img_server, f'{self._key_prefix}{name}', name, mime, metadata)
+@pytest.fixture
+def img_server(request: Any, key_prefix: str, logger: Logger) -> Generator[ImgServer, None, None]:
+  expiration_margin: int = request.param['expiration_margin']
+  basedir: str = request.param['basedir']
 
-  def put_generated(
-      self,
-      name: str,
-      mime: str,
-      timestamp: Optional[datetime.datetime],
-      metadata: dict[str, str] = {},
-  ) -> None:
-    key = f'{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
+  img_server = create_img_server(logger, 'imglambda', expiration_margin, key_prefix, basedir)
+  img_server.sqs.create_queue(QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
 
-    put_generated(self._img_server, key, name, mime, timestamp, metadata)
+  yield img_server
 
-  def receive_sqs_message(self) -> Optional[Dict[str, Any]]:
-    return receive_sqs_message(self._img_server)
+  clean_test_environment(img_server)
 
-  def assert_no_sqs_message(self) -> None:
-    self.assertIsNone(self.receive_sqs_message())
 
-  def assert_sqs_message(self, key: str) -> None:
-    self.assertEqual(
-        {
-            'version': 2,
-            'path': self._key_prefix + key,
-            'src': {
-                'bucket': self._img_server.original_bucket,
-                'prefix': '',
+def assert_sqs_message(img_server: ImgServer, key_prefix: str, key: str) -> None:
+  assert {
+      'version': 2,
+      'path': key_prefix + key,
+      'src': {
+          'bucket': img_server.original_bucket,
+          'prefix': '',
+      },
+      'dest': {
+          'bucket': img_server.generated_bucket,
+          'prefix': img_server.generated_key_prefix,
+      },
+  } == receive_sqs_message(img_server)
+
+
+@pytest.fixture
+def to_path(key_prefix: str) -> Callable[[str], str]:
+
+  def fn(name: str) -> str:
+    return f'/{key_prefix}{name}'
+
+  return fn
+
+
+@pytest.fixture
+def to_uri(img_server: ImgServer, key_prefix: str) -> Callable[[str], str]:
+
+  def fn(name: str) -> str:
+    return f'/{img_server.generated_key_prefix}{key_prefix}{name}'
+
+  return fn
+
+
+@pytest.fixture
+def field_update(
+    request: Any, img_server: ImgServer, to_path: Callable[[str], str],
+    to_uri: Callable[[str], str]) -> FieldUpdate:
+  res_cache_control: Optional[str] = request.param['res_cache_control']
+  res_cache_control_overridable: Optional[str] = request.param['res_cache_control_overridable']
+  origin_domain: bool = request.param['origin_domain']
+  uri: Optional[str] = request.param['uri']
+  uri_for_generated: bool = request.param['uri_for_generated']
+
+  return FieldUpdate(
+      res_cache_control=res_cache_control,
+      res_cache_control_overridable=res_cache_control_overridable,
+      origin_domain=img_server.generated_domain if origin_domain else None,
+      uri=None if uri is None else (to_uri(uri) if uri_for_generated else to_path(uri)))
+
+
+@pytest.fixture
+def sqs_message(request: Any, img_server: ImgServer, key_prefix: str) -> Optional[dict[str, Any]]:
+  key: Optional[str] = request.param['key']
+
+  return None if key is None else {
+      'version': 2,
+      'path': key_prefix + key,
+      'src': {
+          'bucket': img_server.original_bucket,
+          'prefix': '',
+      },
+      'dest': {
+          'bucket': img_server.generated_bucket,
+          'prefix': img_server.generated_key_prefix,
+      },
+  }
+
+
+@pytest.fixture
+def request_path(request: Any, to_path: Callable[[str], str]) -> str:
+  prefix: str = request.param['prefix']
+  name: str = request.param['name']
+
+  return f'{prefix}{to_path(name)}'
+
+
+def file_type(name: str) -> str:
+  mime = mimetypes.guess_file_type(name)[0]
+  if mime is None:
+    raise ValueError(f'cannot guess file type: {name}')
+
+  return mime
+
+
+class ExpectedSqsMessage(TypedDict):
+  key: str
+
+
+class ExpectedFieldUpdate(TypedDict):
+  res_cache_control: NotRequired[str]
+  res_cache_control_overridable: NotRequired[str]
+  origin_domain: NotRequired[bool]
+  uri: NotRequired[str | Tuple[bool, str]]
+
+
+class Config(TypedDict):
+  expiration_margin: NotRequired[int]
+  basedir: NotRequired[str]
+
+
+class Parameters(TypedDict):
+  id: str
+  original: None | str | tuple[str, str] | tuple[str, str, Dict[str, str]]
+  generated: None | str | tuple[str, str] | tuple[str, str, Dict[str, str]] | tuple[str, str, Dict[
+      str, str], Callable[[datetime.datetime], datetime.datetime]]
+  config: NotRequired[Config]
+  request_path: str | tuple[str, str]
+  accept_header: NotRequired[str]
+  expected_field_update: ExpectedFieldUpdate
+  expected_sqs_message: NotRequired[ExpectedSqsMessage]
+
+
+def parameters(params: List[Parameters]) -> Dict[str, Any]:
+  values: List[OrderedDict] = []
+  indirects = []
+  ids = []
+
+  for param in params:
+    ids.append(param['id'])
+
+    v: OrderedDict[str, Any] = OrderedDict()
+
+    original = param['original']
+    if original is None:
+      v['original_name'] = None
+      v['original_mime'] = ''
+      v['original_metadata'] = {}
+    elif isinstance(original, str):
+      v['original_name'] = original
+      v['original_mime'] = file_type(original)
+      v['original_metadata'] = {}
+    elif isinstance(original, tuple) and len(original) == 2:
+      v['original_name'] = original[0]
+      v['original_mime'] = original[1]
+      v['original_metadata'] = {}
+    elif isinstance(original, tuple) and len(original) == 3:
+      v['original_name'] = original[0]
+      v['original_mime'] = original[1]
+      v['original_metadata'] = original[2]
+    else:
+      raise Exception('system error')
+
+    generated = param['generated']
+    if generated is None:
+      v['generated_name'] = None
+      v['generated_mime'] = ''
+      v['generated_metadata'] = {}
+      v['modify_ts'] = None
+    elif isinstance(generated, str):
+      v['generated_name'] = generated
+      v['generated_mime'] = file_type(generated)
+      v['generated_metadata'] = {}
+      v['modify_ts'] = None
+    elif isinstance(generated, tuple) and len(generated) == 2:
+      v['generated_name'] = generated[0]
+      v['generated_mime'] = generated[1]
+      v['generated_metadata'] = {}
+      v['modify_ts'] = None
+    elif isinstance(generated, tuple) and len(generated) == 3:
+      v['generated_name'] = generated[0]
+      v['generated_mime'] = generated[1]
+      v['generated_metadata'] = generated[2]
+      v['modify_ts'] = None
+    elif isinstance(generated, tuple) and len(generated) == 4:
+      v['generated_name'] = generated[0]
+      v['generated_mime'] = generated[1]
+      v['generated_metadata'] = generated[2]
+      v['modify_ts'] = generated[3]
+    else:
+      raise Exception('system error')
+
+    v['accept_header'] = param.get('accept_header', CHROME_ACCEPT_HEADER)
+
+    request_path = param['request_path']
+    if isinstance(request_path, str):
+      prefix = ''
+      name = request_path
+    elif isinstance(request_path, tuple):
+      prefix = request_path[0]
+      name = request_path[1]
+    else:
+      raise Exception('system error')
+    indirects.append('request_path')
+    v['request_path'] = {
+        'prefix': prefix,
+        'name': name,
+    }
+
+    config = param.get('config', {})
+    indirects.append('img_server')
+    v['img_server'] = {
+        'expiration_margin': config.get('expiration_margin', 10),
+        'basedir': config.get('basedir', ''),
+    }
+
+    efu = param['expected_field_update']
+    if 'uri' in efu and isinstance(efu['uri'], str):
+      uri = efu['uri']
+      uri_for_generated = True
+    elif 'uri' in efu and isinstance(efu['uri'], tuple):
+      uri = efu['uri'][1]
+      uri_for_generated = efu['uri'][0]
+    elif 'uri' not in efu:
+      uri = None
+      uri_for_generated = False
+    else:
+      raise Exception('system error')
+    indirects.append('field_update')
+    v['field_update'] = {
+        'res_cache_control': efu.get('res_cache_control', None),
+        'res_cache_control_overridable': efu.get('res_cache_control_overridable', None),
+        'origin_domain': efu.get('origin_domain', False),
+        'uri': uri,
+        'uri_for_generated': uri_for_generated,
+    }
+
+    indirects.append('sqs_message')
+    v['sqs_message'] = {
+        'key': param['expected_sqs_message']['key'] if 'expected_sqs_message' in param else None,
+    }
+
+    values.append(v)
+
+  return {
+      'argnames': list(values[0].keys()),
+      'argvalues': [list(v.values()) for v in values],
+      'indirect': indirects,
+      'ids': ids,
+  }
+
+
+@pytest.mark.parametrize(
+    **parameters(
+        [
+            {
+                'id': 'basedir',
+                'original': JPG_NAME,
+                'generated': JPG_WEBP_NAME,
+                'config': {
+                    'basedir': '/blog',
+                },
+                'request_path': ('/blog', JPG_NAME),
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': f'{JPG_NAME}.webp',
+                },
             },
-            'dest': {
-                'bucket': self._img_server.generated_bucket,
-                'prefix': self._img_server.generated_key_prefix,
+            {
+                'id': 'basedir/bypass',
+                'original': JPG_NAME,
+                'generated': JPG_WEBP_NAME,
+                'config': {
+                    'basedir': '/blog',
+                },
+                'request_path': ('/blog', JPG_NOMINIFY_NAME),  # <-
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'res_cache_control_overridable': 'true',
+                    'uri': (False, JPG_NOMINIFY_NAME),  # <- bypass
+                },
             },
-        }, self.receive_sqs_message())
-
-  def to_path(self, name: str) -> str:
-    return f'/{self._key_prefix}{name}'
-
-  def to_uri(self, name: str) -> str:
-    return f'/{self._img_server.generated_key_prefix}{self._key_prefix}{name}'
-
-  def tearDown(self) -> None:
-    clean_test_environment(self._img_server)
-
-
-class ImgserverBasedirTestCase(BaseTestCase):
-
-  def get_basedir(self) -> str:
-    return '/blog'
-
-  def test_generated(self) -> None:
-    ts = self.put_original(JPG_NAME, JPEG_MIME)
-    self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
-
-    update = self._img_server.process(f'/blog{self.to_path(JPG_NAME)}', CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(f'{JPG_NAME}.webp'),
-        ), update)
-    self.assert_no_sqs_message()
-
-  def test_bypass(self) -> None:
-    update = self._img_server.process(
-        f'/blog{self.to_path(JPG_NOMINIFY_NAME)}', CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            res_cache_control_overridable='true',
-            uri=self.to_path(JPG_NOMINIFY_NAME)), update)
-    self.assert_no_sqs_message()
-
-  def test_no_basedir_generated(self) -> None:
-    ts = self.put_original(JPG_NAME, JPEG_MIME)
-    self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
-
-    update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(f'{JPG_NAME}.webp')), update)
-    self.assert_no_sqs_message()
-
-
-class ImgserverExpiredTestCase(BaseTestCase):
-
-  def get_expiration_margin(self) -> int:
-    return 60 * 60 * 24 * 2
-
-  def test_jpg_accepted_gen_orig(self) -> None:
-    ts = self.put_original(JPG_NAME, JPEG_MIME)
-    self.put_generated(JPG_WEBP_NAME, WEBP_MIME, ts)
-
-    update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(JPG_NAME)
-
-
-class ImgserverTestCase(BaseTestCase):
-
-  # Test_JPGAcceptedS3EFS_L
-  def test_jpg_accepted_gen_orig_l(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
-
-  # Test_JPGAcceptedS3EFS_U
-  def test_jpg_accepted_gen_orig_u(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
-
-  # Test_JPGAcceptedS3EFS_MB
-  def test_jpg_accepted_gen_orig_mb(self) -> None:
-    self.jpg_accepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
-
-  def test_jpg_accepted_gen_orig_avif(self) -> None:
-    self.jpg_accepted_gen_orig(
-        JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME, AVIF_EXTENSION, {
-            OPTIMIZE_TYPE_METADATA: 'avif',
-            OPTIMIZE_QUALITY_METADATA: '60'
-        }, {OPTIMIZE_QUALITY_METADATA: '60'})
-
-  # JPGAcceptedS3EFS
-  def jpg_accepted_gen_orig(
-      self,
-      gen_name: str,
-      orig_name: str,
-      path_name: str,
-      gen_mime: str,
-      expected_extension: str = WEBP_EXTENSION,
-      orig_metadata: dict[str, str] = {},
-      gen_metadata: dict[str, str] = {},
-  ) -> None:
-    ts = self.put_original(orig_name, JPEG_MIME, orig_metadata)
-    self.put_generated(gen_name, gen_mime, ts, gen_metadata)
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(f'{path_name}{expected_extension}'),
-        ), update)
-    self.assert_no_sqs_message()
-
-  # Skipped:
-  #
-  # Test_PublicContentJPG
-
-  # Test_JPGAcceptedS3NoEFS_L
-  def test_jpg_accepted_gen_no_orig_l_webp(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
-
-  def test_jpg_accepted_gen_no_orig_l_avif(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME)
-
-  # Test_JPGAcceptedS3NoEFS_U
-  def test_jpg_accepted_gen_no_orig_u(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
-
-  # Test_JPGAcceptedS3NoEFS_MB
-  def test_jpg_accepted_gen_no_orig_mb(self) -> None:
-    self.jpg_accepted_gen_no_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
-
-  # JPGAcceptedS3NoEFS
-  def jpg_accepted_gen_no_orig(
-      self,
-      gen_name: str,
-      orig_name: str,
-      path_name: str,
-      gen_mime: str,
-      gen_metadata: dict[str, str] = {},
-  ) -> None:
-    self.put_generated(gen_name, gen_mime, DUMMY_DATETIME, gen_metadata)
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(orig_name)
-
-  def test_jpg_accepted_quality_mismatch(self) -> None:
-    ts = self.put_original(
-        JPG_NAME, JPEG_MIME, {
-            OPTIMIZE_TYPE_METADATA: 'avif',
-            OPTIMIZE_QUALITY_METADATA: '60'
-        })
-    self.put_generated(JPG_AVIF_NAME, AVIF_MIME, ts, {OPTIMIZE_QUALITY_METADATA: '50'})
-
-    update = self._img_server.process(self.to_path(JPG_NAME), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(JPG_NAME)
-
-  # Test_JPGAcceptedNoS3EFS_L
-  def test_jpg_accepted_no_gen_orig_l(self) -> None:
-    self.jpg_accepted_no_gen_orig(JPG_NAME, JPG_NAME)
-
-  def test_jpg_accepted_no_gen_orig_avif(self) -> None:
-    self.jpg_accepted_no_gen_orig(
-        JPG_NAME, JPG_NAME, {
-            OPTIMIZE_TYPE_METADATA: 'avif',
-            OPTIMIZE_QUALITY_METADATA: '60'
-        })
-
-  # Test_JPGAcceptedNoS3EFS_U
-  def test_jpg_accepted_no_gen_orig_u(self) -> None:
-    self.jpg_accepted_no_gen_orig(JPG_NAME_U, JPG_NAME_U)
-
-  # Test_JPGAcceptedNoS3EFS_MB
-  def test_jpg_accepted_no_gen_orig_mb(self) -> None:
-    self.jpg_accepted_no_gen_orig(JPG_NAME_MB, JPG_NAME_MB_Q)
-
-  # JPGAcceptedNoS3EFS
-  def jpg_accepted_no_gen_orig(
-      self, orig_name: str, path_name: str, metadata: dict[str, str] = {}) -> None:
-    self.put_original(orig_name, JPEG_MIME, metadata)
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(orig_name)
-
-  # Test_JPGAcceptedNoS3NoEFS_L
-  def test_jpg_accepted_no_gen_no_orig_l(self) -> None:
-    self.jpg_accepted_no_gen_no_orig(JPG_NAME)
-
-  # Test_JPGAcceptedNoS3NoEFS_U
-  def test_jpg_accepted_no_gen_no_orig_u(self) -> None:
-    self.jpg_accepted_no_gen_no_orig(JPG_NAME_U)
-
-  # Test_JPGAcceptedNoS3NoEFS_MB
-  def test_jpg_accepted_no_gen_no_orig_mb(self) -> None:
-    self.jpg_accepted_no_gen_no_orig(JPG_NAME_MB_Q)
-
-  # JPGAcceptedNoS3NoEFS
-  def jpg_accepted_no_gen_no_orig(self, path_name: str) -> None:
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_no_sqs_message()
-
-  # Test_JPGUnacceptedS3EFS_L
-  def test_jpg_unaccepted_gen_orig_l(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
-
-  def test_jpg_unaccepted_gen_orig_avif(self) -> None:
-    self.jpg_unaccepted_gen_orig(
-        JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME, {
-            OPTIMIZE_TYPE_METADATA: 'avif',
-            OPTIMIZE_QUALITY_METADATA: '60'
-        }, {OPTIMIZE_QUALITY_METADATA: '60'})
-
-  # Test_JPGUnacceptedS3EFS_U
-  def test_jpg_unaccepted_gen_orig_u(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
-
-  # Test_JPGUnacceptedS3EFS_MB
-  def test_jpg_unaccepted_gen_orig_mb(self) -> None:
-    self.jpg_unaccepted_gen_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
-
-  # JPGUnacceptedS3EFS
-  def jpg_unaccepted_gen_orig(
-      self,
-      gen_name: str,
-      orig_name: str,
-      path_name: str,
-      gen_mime: str,
-      orig_metadata: dict[str, str] = {},
-      gen_metadata: dict[str, str] = {},
-  ) -> None:
-    ts = self.put_original(orig_name, JPEG_MIME, orig_metadata)
-    self.put_generated(gen_name, gen_mime, ts, gen_metadata)
-
-    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
-    self.assert_no_sqs_message()
-
-  # Test_JPGUnacceptedS3NoEFS_L
-  def test_jpg_unaccepted_gen_no_orig_l(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME, JPG_NAME, JPG_NAME, WEBP_MIME)
-
-  def test_jpg_unaccepted_gen_no_orig_avif(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_AVIF_NAME, JPG_NAME, JPG_NAME, AVIF_MIME)
-
-  # Test_JPGUnacceptedS3NoEFS_U
-  def test_jpg_unaccepted_gen_no_orig_u(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U, WEBP_MIME)
-
-  # Test_JPGUnacceptedS3NoEFS_MB
-  def test_jpg_unaccepted_gen_no_orig_mb(self) -> None:
-    self.jpg_unaccepted_gen_no_orig(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q, WEBP_MIME)
-
-  # JPGUnacceptedS3NoEFS
-  def jpg_unaccepted_gen_no_orig(
-      self, gen_name: str, orig_name: str, path_name: str, gen_mime: str) -> None:
-    self.put_generated(gen_name, gen_mime, DUMMY_DATETIME)
-
-    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(orig_name)
-
-  # Test_JPGUnacceptedNoS3EFS_L
-  def test_jpg_unaccepted_no_gen_orig_l(self) -> None:
-    self.jpg_unaccepted_no_gen_orig(JPG_NAME, JPG_NAME)
-
-  # Test_JPGUnacceptedNoS3EFS_U
-  def test_jpg_unaccepted_no_gen_orig_u(self) -> None:
-    self.jpg_unaccepted_no_gen_orig(JPG_NAME_U, JPG_NAME_U)
-
-  # Test_JPGUnacceptedNoS3EFS_MB
-  def test_jpg_unaccepted_no_gen_orig_mb(self) -> None:
-    self.jpg_unaccepted_no_gen_orig(JPG_NAME_MB, JPG_NAME_MB_Q)
-
-  # JPGUnacceptedNoS3EFS
-  def jpg_unaccepted_no_gen_orig(self, orig_name: str, path_name: str) -> None:
-    self.put_original(orig_name, JPEG_MIME)
-
-    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_PERM), update)
-    self.assert_sqs_message(orig_name)
-
-  # Test_JPGUnacceptedNoS3NoEFS_L
-  def test_jpg_unaccepted_no_gen_no_orig_l(self) -> None:
-    self.jpg_unaccepted_no_gen_no_orig(JPG_NAME)
-
-  # Test_JPGUnacceptedNoS3NoEFS_U
-  def test_jpg_unaccepted_no_gen_no_orig_u(self) -> None:
-    self.jpg_unaccepted_no_gen_no_orig(JPG_NAME_U)
-
-  # Test_JPGUnacceptedNoS3NoEFS_MB
-  def test_jpg_unaccepted_no_gen_no_orig_mb(self) -> None:
-    self.jpg_unaccepted_no_gen_no_orig(JPG_NAME_MB_Q)
-
-  # JPGUnacceptedNoS3NoEFS
-  def jpg_unaccepted_no_gen_no_orig(self, path_name: str) -> None:
-    update = self._img_server.process(self.to_path(path_name), OLD_SAFARI_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_no_sqs_message()
-
-  # Test_JPGAcceptedS3EFSOld_L
-  def test_jpg_accepted_gen_orig_old_l(self) -> None:
-    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME, JPG_NAME, JPG_NAME)
-
-  # Test_JPGAcceptedS3EFSOld_U
-  def test_jpg_accepted_gen_orig_old_u(self) -> None:
-    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME_U, JPG_NAME_U, JPG_NAME_U)
-
-  # Test_JPGAcceptedS3EFSOld_MB
-  def test_jpg_accepted_gen_orig_old_mb(self) -> None:
-    self.jpg_accepted_gen_orig_old(JPG_WEBP_NAME_MB, JPG_NAME_MB, JPG_NAME_MB_Q)
-
-  # JPGAcceptedS3EFSOld
-  def jpg_accepted_gen_orig_old(self, gen_name: str, orig_name: str, path_name: str) -> None:
-    ts = self.put_original(orig_name, JPEG_MIME)
-    self.put_generated(gen_name, JPEG_MIME, ts + datetime.timedelta(1))
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(orig_name)
-
-  # Skipped:
-  #
-  # Test_JPGAcceptedNoS3EFSBatchSendRepeat
-  # Test_JPGAcceptedNoS3EFSBatchSendWait
-  # Test_ReopenLogFile
-
-  # Test_CSSS3EFS
-  def test_css_gen_orig(self) -> None:
-    ts = self.put_original(CSS_NAME, CSS_MIME)
-    self.put_generated(CSS_NAME, CSS_MIME, ts)
-
-    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(
-            res_cache_control=CACHE_CONTROL_PERM,
-            origin_domain=self._img_server.generated_domain,
-            uri=self.to_uri(CSS_NAME_Q),
-        ), update)
-    self.assert_no_sqs_message()
-
-  # Test_CSSS3NoEFS
-  def test_css_gen_no_orig(self) -> None:
-    self.put_generated(CSS_NAME, CSS_MIME, DUMMY_DATETIME)
-
-    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(CSS_NAME)
-
-  # Test_CSSNoS3EFS
-  def test_css_no_gen_orig(self) -> None:
-    self.put_original(CSS_NAME, CSS_MIME)
-
-    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(CSS_NAME)
-
-  # Test_CSSNoS3NoEFS
-  def test_css_no_gen_no_orig(self) -> None:
-    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_no_sqs_message()
-
-  # Test_CSSS3EFSOld
-  def test_css_gen_orig_old(self) -> None:
-    ts = self.put_original(CSS_NAME, CSS_MIME)
-    self.put_generated(CSS_NAME, CSS_MIME, ts + datetime.timedelta(1))
-
-    update = self._img_server.process(self.to_path(CSS_NAME_Q), CHROME_ACCEPT_HEADER)
-    self.assertEqual(FieldUpdate(res_cache_control=CACHE_CONTROL_TEMP), update)
-    self.assert_sqs_message(CSS_NAME)
-
-  # Test_MinCSSS3EFS
-  def test_min_css_gen_orig(self) -> None:
-    self.file_gen_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
-
-  # FileS3EFS
-  def file_gen_orig(self, key_name: str, path_name: str, mime: str) -> None:
-    ts = self.put_original(key_name, mime)
-    self.put_generated(key_name, mime, ts)
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
-        update)
-    self.assert_no_sqs_message()
-
-  # Test_MinCSSS3NoEFS
-  def test_min_css_gen_no_orig(self) -> None:
-    self.file_gen_no_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
-
-  # FileS3NoEFS
-  def file_gen_no_orig(self, key_name: str, path_name: str, mime: str) -> None:
-    self.put_generated(key_name, mime, DUMMY_DATETIME)
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
-        update)
-    self.assert_no_sqs_message()
-
-  # Test_MinCSSNoS3EFS
-  def test_min_css_no_gen_orig(self) -> None:
-    self.file_no_gen_orig(MIN_CSS_NAME, MIN_CSS_NAME_Q, CSS_MIME)
-
-  # FileNoS3EFS
-  def file_no_gen_orig(self, key_name: str, path_name: str, mime: str) -> None:
-    self.put_original(key_name, mime)
-
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
-        update)
-    self.assert_no_sqs_message()
-
-  # Test_MinCSSNoS3NoEFS
-  def test_min_css_no_gen_no_orig(self) -> None:
-    self.file_no_gen_no_orig(MIN_CSS_NAME_Q)
-
-  # FileNoS3NoEFS
-  def file_no_gen_no_orig(self, path_name: str) -> None:
-    update = self._img_server.process(self.to_path(path_name), CHROME_ACCEPT_HEADER)
-    self.assertEqual(
-        FieldUpdate(res_cache_control=CACHE_CONTROL_PERM, res_cache_control_overridable='true'),
-        update)
-    self.assert_no_sqs_message()
-
-
-if 'unittest.util' in __import__('sys').modules:
-  # Show full diff in self.assertEqual.
-  __import__('sys').modules['unittest.util']._MAX_LENGTH = 999999999
+            {
+                'id': 'basedir/no_basedir_generated',
+                'original': JPG_NAME,
+                'generated': JPG_WEBP_NAME,
+                'config': {
+                    'basedir': '/blog',
+                },
+                'request_path': ('', JPG_NAME),  # <- has no basedir but still works
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': f'{JPG_NAME}.webp',  # <-
+                },
+            },
+            {
+                'id': 'expired',
+                'original': JPG_NAME,
+                'generated': JPG_WEBP_NAME,
+                'config': {
+                    'expiration_margin': 60 * 60 * 24 * 2,
+                },
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGAcceptedS3EFS_L
+                'id': 'jpg/accepted/gen/orig/l',
+                'original': JPG_NAME,
+                'generated': JPG_WEBP_NAME,
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': f'{JPG_NAME}{WEBP_EXTENSION}',
+                },
+            },
+            {
+                # Test_JPGAcceptedS3EFS_U
+                'id': 'jpg/accepted/gen/orig/u',
+                'original': JPG_NAME_U,
+                'generated': JPG_WEBP_NAME_U,
+                'request_path': JPG_NAME_U,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': f'{JPG_NAME_U}{WEBP_EXTENSION}',
+                },
+            },
+            {
+                # Test_JPGAcceptedS3EFS_MB
+                'id': 'jpg/accepted/gen/orig/mb',
+                'original': JPG_NAME_MB,
+                'generated': JPG_WEBP_NAME_MB,
+                'request_path': JPG_NAME_MB_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': f'{JPG_NAME_MB_Q}{WEBP_EXTENSION}',
+                },
+            },
+            {
+                'id': 'jpg/accepted/gen/orig/avif',
+                'original': (
+                    JPG_NAME, JPEG_MIME, {
+                        OPTIMIZE_TYPE_METADATA: 'avif',
+                        OPTIMIZE_QUALITY_METADATA: '60',
+                    }),
+                'generated': (JPG_AVIF_NAME, AVIF_MIME, {
+                    OPTIMIZE_QUALITY_METADATA: '60',
+                }),
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': f'{JPG_NAME}{AVIF_EXTENSION}',
+                },
+            },
+            {
+                # Test_JPGAcceptedS3NoEFS_L
+                'id': 'jpg/accepted/gen/no_orig/l/webp',
+                'original': None,
+                'generated': JPG_WEBP_NAME,
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                'id': 'jpg/accepted/gen/no_orig/l/avif',
+                'original': None,
+                'generated': JPG_AVIF_NAME,
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGAcceptedS3NoEFS_U
+                'id': 'jpg/accepted/gen/no_orig/u',
+                'original': None,
+                'generated': JPG_WEBP_NAME_U,
+                'request_path': JPG_NAME_U,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_U,
+                },
+            },
+            {
+                # Test_JPGAcceptedS3NoEFS_MB
+                'id': 'jpg/accepted/gen/no_orig/mb',
+                'original': None,
+                'generated': JPG_WEBP_NAME_MB,
+                'request_path': JPG_NAME_MB_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_MB,
+                },
+            },
+            {
+                'id': 'jpg/accepted/quality_mismatch',
+                'original': (
+                    JPG_NAME, JPEG_MIME, {
+                        OPTIMIZE_TYPE_METADATA: 'avif',
+                        OPTIMIZE_QUALITY_METADATA: '60',
+                    }),
+                'generated': (JPG_AVIF_NAME, AVIF_MIME, {
+                    OPTIMIZE_QUALITY_METADATA: '50'
+                }),
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGAcceptedNoS3EFS_L
+                'id': 'jpg/accepted/no_gen/orig/l',
+                'original': JPG_NAME,
+                'generated': None,
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                'id': 'jpg/accepted/no_gen/orig/avif',
+                'original': (
+                    JPG_NAME, JPEG_MIME, {
+                        OPTIMIZE_TYPE_METADATA: 'avif',
+                        OPTIMIZE_QUALITY_METADATA: '60'
+                    }),
+                'generated': None,
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGAcceptedNoS3EFS_U
+                'id': 'jpg/accepted/no_gen/orig/u',
+                'original': JPG_NAME_U,
+                'generated': None,
+                'request_path': JPG_NAME_U,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_U,
+                },
+            },
+            {
+                # Test_JPGAcceptedNoS3EFS_MB
+                'id': 'jpg/accepted/no_gen/orig/mb',
+                'original': JPG_NAME_MB,
+                'generated': None,
+                'request_path': JPG_NAME_MB_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_MB,
+                },
+            },
+            {
+                # Test_JPGAcceptedNoS3NoEFS_L
+                'id': 'jpg/accepted/no_gen/no_orig/l',
+                'original': None,
+                'generated': None,
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_JPGAcceptedNoS3NoEFS_U
+                'id': 'jpg/accepted/no_gen/no_orig/u',
+                'original': None,
+                'generated': None,
+                'request_path': JPG_NAME_U,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_JPGAcceptedNoS3NoEFS_MB
+                'id': 'jpg/accepted/no_gen/no_orig/mb',
+                'original': None,
+                'generated': None,
+                'request_path': JPG_NAME_MB_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_JPGUnacceptedS3EFS_L
+                'id': 'jpg/unaccepted/gen/orig/l',
+                'original': JPG_NAME,
+                'generated': JPG_WEBP_NAME,
+                'request_path': JPG_NAME,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+            },
+            {
+                'id': 'jpg/unaccepted/gen/orig/avif',
+                'original': (
+                    JPG_NAME, JPEG_MIME, {
+                        OPTIMIZE_TYPE_METADATA: 'avif',
+                        OPTIMIZE_QUALITY_METADATA: '60'
+                    }),
+                'generated': (JPG_AVIF_NAME, AVIF_MIME, {
+                    OPTIMIZE_QUALITY_METADATA: '60'
+                }),
+                'request_path': JPG_NAME,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+            },
+            {
+                # Test_JPGUnacceptedS3EFS_U
+                'id': 'jpg/unaccepted/gen/orig/u',
+                'original': JPG_NAME_U,
+                'generated': JPG_WEBP_NAME_U,
+                'request_path': JPG_NAME_U,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+            },
+            {
+                # Test_JPGUnacceptedS3EFS_MB
+                'id': 'jpg/unaccepted/gen/orig/mb',
+                'original': JPG_NAME_MB,
+                'generated': JPG_WEBP_NAME_MB,
+                'request_path': JPG_NAME_MB_Q,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+            },
+            {
+                # Test_JPGUnacceptedS3NoEFS_L
+                'id': 'jpg/unaccepted/gen/no_orig/l',
+                'original': None,
+                'generated': JPG_WEBP_NAME,
+                'request_path': JPG_NAME,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                'id': 'jpg/unaccepted/gen/no_orig/avif',
+                'original': None,
+                'generated': JPG_AVIF_NAME,
+                'request_path': JPG_NAME,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGUnacceptedS3NoEFS_U
+                'id': 'jpg/unaccepted/gen/no_orig/u',
+                'original': None,
+                'generated': JPG_WEBP_NAME_U,
+                'request_path': JPG_NAME_U,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_U,
+                },
+            },
+            {
+                # Test_JPGUnacceptedS3NoEFS_MB
+                'id': 'jpg/unaccepted/gen/no_orig/mb',
+                'original': None,
+                'generated': JPG_WEBP_NAME_MB,
+                'request_path': JPG_NAME_MB_Q,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_MB,
+                },
+            },
+            {
+                # Test_JPGUnacceptedNoS3EFS_L
+                'id': 'jpg/unaccepted/no_gen/orig/l',
+                'original': JPG_NAME,
+                'generated': None,
+                'request_path': JPG_NAME,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGUnacceptedNoS3EFS_U
+                'id': 'jpg/unaccepted/no_gen/orig/u',
+                'original': JPG_NAME_U,
+                'generated': None,
+                'request_path': JPG_NAME_U,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_U,
+                },
+            },
+            {
+                # Test_JPGUnacceptedNoS3EFS_MB
+                'id': 'jpg/unaccepted/no_gen/orig/mb',
+                'original': JPG_NAME_MB,
+                'generated': None,
+                'request_path': JPG_NAME_MB_Q,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_MB,
+                },
+            },
+            {
+                # Test_JPGUnacceptedNoS3NoEFS_L
+                'id': 'jpg/unaccepted/no_gen/no_orig/l',
+                'original': None,
+                'generated': None,
+                'request_path': JPG_NAME,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_JPGUnacceptedNoS3NoEFS_U
+                'id': 'jpg/unaccepted/no_gen/no_orig/u',
+                'original': None,
+                'generated': None,
+                'request_path': JPG_NAME_U,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_JPGUnacceptedNoS3NoEFS_MB
+                'id': 'jpg/unaccepted/no_gen/no_orig/mb',
+                'original': None,
+                'generated': None,
+                'request_path': JPG_NAME_MB_Q,
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_JPGAcceptedS3EFSOld_L
+                'id': 'jpg/accepted/gen/orig/old/l',
+                'original': JPG_NAME,
+                'generated': (JPG_WEBP_NAME, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+                'request_path': JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME,
+                },
+            },
+            {
+                # Test_JPGAcceptedS3EFSOld_U
+                'id': 'jpg/accepted/gen/orig/old/u',
+                'original': JPG_NAME_U,
+                'generated': (
+                    JPG_WEBP_NAME_U, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+                'request_path': JPG_NAME_U,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_U,
+                },
+            },
+            {
+                # Test_JPGAcceptedS3EFSOld_MB
+                'id': 'jpg/accepted/gen/orig/old/mb',
+                'original': JPG_NAME_MB,
+                'generated': (
+                    JPG_WEBP_NAME_MB, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+                'request_path': JPG_NAME_MB_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': JPG_NAME_MB,
+                },
+            },
+            {
+                # Test_CSSS3EFS
+                'id': 'css/gen/orig',
+                'original': CSS_NAME,
+                'generated': CSS_NAME,
+                'request_path': CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'origin_domain': True,
+                    'uri': CSS_NAME_Q,
+                },
+            },
+            {
+                # Test_CSSS3NoEFS
+                'id': 'css/gen/no_orig',
+                'original': None,
+                'generated': CSS_NAME,
+                'request_path': CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': CSS_NAME,
+                },
+            },
+            {
+                # Test_CSSNoS3EFS
+                'id': 'css/no_gen/orig',
+                'original': CSS_NAME,
+                'generated': None,
+                'request_path': CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': CSS_NAME,
+                },
+            },
+            {
+                # Test_CSSNoS3NoEFS
+                'id': 'css/no_gen/no_orig',
+                'original': None,
+                'generated': None,
+                'request_path': CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+            },
+            {
+                # Test_CSSS3EFSOld
+                'id': 'css/gen/orig/old',
+                'original': CSS_NAME,
+                'generated': (CSS_NAME, CSS_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+                'request_path': CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': CSS_NAME,
+                },
+            },
+            {
+                # Test_MinCSSS3EFS
+                'id': 'min_css/gen/orig',
+                'original': MIN_CSS_NAME,
+                'generated': MIN_CSS_NAME,
+                'request_path': MIN_CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'res_cache_control_overridable': 'true',
+                },
+            },
+            {
+                # Test_MinCSSS3NoEFS
+                'id': 'min_css/gen/no_orig',
+                'original': None,
+                'generated': MIN_CSS_NAME,
+                'request_path': MIN_CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'res_cache_control_overridable': 'true',
+                },
+            },
+            {
+                # Test_MinCSSNoS3EFS
+                'id': 'min_css/no_gen/orig',
+                'original': MIN_CSS_NAME,
+                'generated': None,
+                'request_path': MIN_CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'res_cache_control_overridable': 'true',
+                },
+            },
+            {
+                # Test_MinCSSNoS3NoEFS
+                'id': 'min_css/no_gen/no_orig',
+                'original': None,
+                'generated': None,
+                'request_path': MIN_CSS_NAME_Q,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_PERM,
+                    'res_cache_control_overridable': 'true',
+                },
+            },
+        ]))
+def test_generated(
+    original_name: Optional[str],
+    original_mime: str,
+    original_metadata: dict[str, str],
+    generated_name: Optional[str],
+    generated_mime: str,
+    generated_metadata: dict[str, str],
+    accept_header: str,
+    request_path: str,
+    img_server: ImgServer,
+    field_update: FieldUpdate,
+    sqs_message: Optional[dict[str, Any]],
+    key_prefix: str,
+    modify_ts: Optional[Callable[[datetime.datetime], datetime.datetime]],
+) -> None:
+  if original_name is None:
+    ts = DUMMY_DATETIME
+  else:
+    ts = put_original(img_server, key_prefix, original_name, original_mime, original_metadata)
+
+  if modify_ts is not None:
+    ts = modify_ts(ts)
+
+  if generated_name is not None:
+    put_generated(img_server, key_prefix, generated_name, generated_mime, ts, generated_metadata)
+
+  update = img_server.process(request_path, accept_header)
+
+  assert field_update == update
+  if sqs_message is None:
+    assert receive_sqs_message(img_server) is None
+  else:
+    assert receive_sqs_message(img_server) == sqs_message

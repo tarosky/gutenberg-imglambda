@@ -1,7 +1,7 @@
 #!/bin/bash -eu
 
 if [ -z "${1:-}" ]; then
-  exec poetry run python -m unittest discover -v -p 'test_*.py'
+  exec poetry run python -m pytest -s -v
 else
   path="$1"
 
@@ -19,5 +19,5 @@ else
   fi
 
   echo "Tests running: $test"
-  exec poetry run python -m unittest -v "$test"
+  exec poetry run python -m pytest -s -v "$test"
 fi
