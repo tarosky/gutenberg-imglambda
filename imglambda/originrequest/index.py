@@ -118,7 +118,7 @@ class OptimImageType(Enum):
   AVIF = 2
 
   @classmethod
-  def create_from_s3_object(cls, obj: HeadObjectOutputTypeDef) -> Optional['OptimImageType']:
+  def maybe_from_s3_metadata(cls, obj: HeadObjectOutputTypeDef) -> Optional['OptimImageType']:
     image_type = obj['Metadata'].get(OPTIMIZE_TYPE_METADATA)
     if image_type is None:
       return cls.WEBP
@@ -128,6 +128,15 @@ class OptimImageType(Enum):
       return cls.AVIF
     return cls.WEBP
 
+  @classmethod
+  def maybe_from_s3_content_type(cls, obj: HeadObjectOutputTypeDef) -> Optional['OptimImageType']:
+    mime = obj['ContentType']
+    if mime == 'image/webp':
+      return cls.WEBP
+    if mime == 'image/avif':
+      return cls.AVIF
+    return None
+
   def extension(self) -> str:
     if self == OptimImageType.WEBP:
       return '.webp'
@@ -136,14 +145,14 @@ class OptimImageType(Enum):
     raise Exception('system error')
 
 
-class ImagePriority:
+class AcceptableImages:
   types: set[OptimImageType]
 
   def __init__(self, types: set[OptimImageType]):
     self.types = types
 
   @classmethod
-  def create_from_accept_header(cls, accept_header: str) -> Self:
+  def from_accept_header(cls, accept_header: str) -> Self:
     types = set()
 
     if 'image/avif' in accept_header:
@@ -166,24 +175,32 @@ class ImagePriority:
     return None
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(eq=True, frozen=True)
 class ObjectMeta:
   last_modified: datetime.datetime
   optimize_type: Optional[OptimImageType]
   optimize_quality: Optional[str]
 
   @classmethod
-  def from_object(cls, obj: HeadObjectOutputTypeDef) -> 'ObjectMeta':
+  def from_original_object(cls, obj: HeadObjectOutputTypeDef) -> 'ObjectMeta':
+    if obj['ContentType'] in ['image/jpeg', 'image/png']:
+      optimize_type = OptimImageType.maybe_from_s3_metadata(obj)
+    else:
+      optimize_type = None
+
     return cls(
         last_modified=obj['LastModified'],
-        optimize_type=OptimImageType.create_from_s3_object(obj),
+        optimize_type=optimize_type,
         optimize_quality=obj['Metadata'].get(OPTIMIZE_QUALITY_METADATA))
 
   @classmethod
-  def from_generated_object(cls, obj: HeadObjectOutputTypeDef) -> 'ObjectMeta':
+  def maybe_from_generated_object(cls, obj: HeadObjectOutputTypeDef) -> Optional['ObjectMeta']:
+    if TIMESTAMP_METADATA not in obj['Metadata']:
+      return None
+
     return cls(
         last_modified=parser.parse(obj['Metadata'][TIMESTAMP_METADATA]),
-        optimize_type=OptimImageType.create_from_s3_object(obj),
+        optimize_type=OptimImageType.maybe_from_s3_content_type(obj),
         optimize_quality=obj['Metadata'].get(OPTIMIZE_QUALITY_METADATA))
 
 
@@ -353,17 +370,6 @@ class ImgServer:
     update.uri = path
     return update
 
-  def get_time_original(self, key: S3Key) -> Optional[datetime.datetime]:
-    try:
-      res = self.s3.head_object(Bucket=self.original_bucket, Key=key)
-    except ClientError as e:
-      if is_not_found_client_error(e):
-        return None
-      raise e
-
-    # Return timezone-aware datetime
-    return res['LastModified']
-
   def get_meta_original(self, key: S3Key) -> Optional[ObjectMeta]:
     try:
       res = self.s3.head_object(Bucket=self.original_bucket, Key=key)
@@ -371,7 +377,7 @@ class ImgServer:
       if is_not_found_client_error(e):
         return None
       raise e
-    return ObjectMeta.from_object(res)
+    return ObjectMeta.from_original_object(res)
 
   def gen_path_from_path(self, path: HttpPath) -> HttpPath:
     return HttpPath(f'/{self.generated_key_prefix}{path[1:]}')
@@ -382,7 +388,6 @@ class ImgServer:
   def object_expired(
       self,
       now: datetime.datetime,
-      key: S3Key,
       expiration: str,
   ) -> bool:
     d = parse_expiration(expiration)
@@ -394,27 +399,6 @@ class ImgServer:
     exp = parser.parse(exp_str)
     return exp < now + self.expiration_margin
 
-  def get_time_generated(
-      self,
-      now: datetime.datetime,
-      key: S3Key,
-  ) -> Optional[datetime.datetime]:
-    key = self.gen_key_from_key(key)
-    try:
-      res = self.s3.head_object(Bucket=self.generated_bucket, Key=key)
-      if 'Expiration' in res and self.object_expired(now, key, res['Expiration']):
-        self.log_debug('expired object found', {'expiration': res['Expiration']})
-        return None
-    except ClientError as e:
-      if is_not_found_client_error(e):
-        return None
-      raise e
-
-    t_str: Optional[str] = res['Metadata'].get(TIMESTAMP_METADATA, None)
-    if t_str is None:
-      return None
-    return parser.parse(t_str)
-
   def get_meta_generated(
       self,
       now: datetime.datetime,
@@ -423,7 +407,7 @@ class ImgServer:
     key = self.gen_key_from_key(key)
     try:
       res = self.s3.head_object(Bucket=self.generated_bucket, Key=key)
-      if 'Expiration' in res and self.object_expired(now, key, res['Expiration']):
+      if 'Expiration' in res and self.object_expired(now, res['Expiration']):
         self.log_debug('expired object found', {'expiration': res['Expiration']})
         return None
     except ClientError as e:
@@ -431,22 +415,9 @@ class ImgServer:
         return None
       raise e
 
-    if TIMESTAMP_METADATA not in res['Metadata']:
-      return None
+    return ObjectMeta.maybe_from_generated_object(res)
 
-    return ObjectMeta.from_generated_object(res)
-
-  def keep_uptodate(
-      self,
-      key: S3Key,
-      t_orig: Optional[datetime.datetime],
-      t_gen: Optional[datetime.datetime],
-      orig_quality: Optional[str] = None,
-      gen_quality: Optional[str] = None,
-  ) -> None:
-    if t_gen == t_orig and orig_quality == gen_quality:
-      return
-
+  def keep_uptodate(self, key: S3Key) -> None:
     body = {
         'version': API_VERSION,
         'path': key,
@@ -464,7 +435,7 @@ class ImgServer:
     self.log_debug('enqueued', {'body': body})
 
   def process_for_image_requester(self, path: HttpPath, accept_header: str) -> FieldUpdate:
-    priority = ImagePriority.create_from_accept_header(accept_header)
+    acceptables = AcceptableImages.from_accept_header(accept_header)
     try:
       now = get_now()
 
@@ -474,42 +445,37 @@ class ImgServer:
       if orig_meta is None:
         for image_type in OptimImageType:
           gen_meta = self.get_meta_generated(now, S3Key(f'{key}{image_type.extension()}'))
-          if gen_meta is not None:
-            self.keep_uptodate(key, None, gen_meta.last_modified)
+          if orig_meta != gen_meta:
+            self.keep_uptodate(key)
 
         return self.as_temporary(FieldUpdate())
-
-      if orig_meta.optimize_type is not None:
-        gen_meta = self.get_meta_generated(
-            now, S3Key(f'{key}{orig_meta.optimize_type.extension()}'))
-        gen_last_modified = None if gen_meta is None else gen_meta.last_modified
-        gen_optimize_quality = None if gen_meta is None else gen_meta.optimize_quality
-
-        self.keep_uptodate(
-            key, orig_meta.last_modified, gen_last_modified, orig_meta.optimize_quality,
-            gen_optimize_quality)
-
-      if not priority.optimizable():
-        return self.as_permanent(FieldUpdate())
 
       if orig_meta.optimize_type is None:
-        return self.as_temporary(FieldUpdate())
+        if acceptables.optimizable():
+          return self.as_temporary(FieldUpdate())
+        return self.as_permanent(FieldUpdate())
 
-      updated_path = self.gen_path_from_path(f'{path}{orig_meta.optimize_type.extension()}')
+      gen_meta = self.get_meta_generated(now, S3Key(f'{key}{orig_meta.optimize_type.extension()}'))
 
-      if priority.response_type(orig_meta.optimize_type) is None:
+      if orig_meta != gen_meta:
+        self.keep_uptodate(key)
+
+      if not acceptables.optimizable():
+        return self.as_permanent(FieldUpdate())
+
+      updated_path = self.gen_path_from_path(
+          HttpPath(f'{path}{orig_meta.optimize_type.extension()}'))
+
+      if acceptables.response_type(orig_meta.optimize_type) is None:
         return self.as_permanent(self.origin_as_generated(updated_path, FieldUpdate()))
 
-      if orig_meta.last_modified != gen_last_modified:
-        return self.as_temporary(FieldUpdate())
-
-      if orig_meta.optimize_quality != gen_optimize_quality:
+      if orig_meta != gen_meta:
         return self.as_temporary(FieldUpdate())
 
       return self.as_permanent(self.origin_as_generated(updated_path, FieldUpdate()))
     except Exception as e:
       self.log_error('error during process_for_image_requester()', {'error': str(e)})
-      if priority.optimizable():
+      if acceptables.optimizable():
         return self.as_temporary(FieldUpdate())
       return self.as_permanent(FieldUpdate())
 
@@ -517,12 +483,13 @@ class ImgServer:
     key = key_from_path(path)
     try:
       now = get_now()
-      t_gen = self.get_time_generated(now, key)
-      t_orig = self.get_time_original(key)
+      gen_meta = self.get_meta_generated(now, key)
+      orig_meta = self.get_meta_original(key)
 
-      self.keep_uptodate(key, t_orig, t_gen)
+      if orig_meta != gen_meta:
+        self.keep_uptodate(key)
 
-      if t_orig is not None and t_orig == t_gen:
+      if orig_meta is not None and orig_meta == gen_meta:
         return self.as_permanent(
             self.origin_as_generated(self.gen_path_from_path(path), FieldUpdate()))
       return self.as_temporary(FieldUpdate())
