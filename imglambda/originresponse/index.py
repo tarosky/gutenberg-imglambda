@@ -9,14 +9,11 @@ from pythonjsonlogger.jsonlogger import JsonFormatter
 import imglambda
 from imglambda.typing import Request, Response
 
-MESSAGE = 'message'
-
 
 class MyJsonFormatter(JsonFormatter):
 
   def add_fields(self, log_record: Any, record: Any, message_dict: Any) -> None:
-    log_record['_ts'] = datetime.datetime.now(datetime.UTC).strftime(
-        '%Y-%m-%dT%H:%M:%S.%fZ')
+    log_record['_ts'] = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
     if log_record.get('level'):
       log_record['level'] = log_record['level'].upper()
@@ -82,11 +79,10 @@ def new_cache_control(req: Request, res: Response) -> str:
 def lambda_main(req: Request, res: Response) -> Response:
   cache_control = new_cache_control(req, res)
   path = req['uri'][1:]
-  log.debug(
-      {
-          MESSAGE: 'new cache-control',
-          'cache-control': cache_control,
-          'path': path,
-      })
+  log.debug({
+      'message': 'new cache-control',
+      'cache-control': cache_control,
+      'path': path,
+  })
   res['headers']['cache-control'] = [{'value': cache_control}]
   return res

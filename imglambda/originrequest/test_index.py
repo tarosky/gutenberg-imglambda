@@ -26,12 +26,12 @@ from mypy_boto3_sqs.type_defs import MessageTypeDef
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 
+from imglambda.typing import HttpPath
+
 from .index import (
-    AVIF_EXTENSION,
     OPTIMIZE_QUALITY_METADATA,
     OPTIMIZE_TYPE_METADATA,
     TIMESTAMP_METADATA,
-    WEBP_EXTENSION,
     FieldUpdate,
     ImgServer,
     MyJsonFormatter
@@ -71,6 +71,9 @@ OLD_SAFARI_ACCEPT_HEADER = 'image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,
 
 CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
 CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
+
+WEBP_EXTENSION = '.webp'
+AVIF_EXTENSION = '.avif'
 
 
 def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
@@ -113,7 +116,7 @@ def create_img_server(
       sqs_queue_url=f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}',
       perm_resp_max_age=PERM_RESP_MAX_AGE,
       temp_resp_max_age=TEMP_RESP_MAX_AGE,
-      bypass_minifier_path_spec=PathSpec.from_lines(
+      bypass_path_spec=PathSpec.from_lines(
           GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
       expiration_margin=expiration_margin,
       basedir=basedir)
@@ -292,11 +295,11 @@ def sqs_message(request: Any, img_server: ImgServer, key_prefix: str) -> Optiona
 
 
 @pytest.fixture
-def request_path(request: Any, to_path: Callable[[str], str]) -> str:
+def request_path(request: Any, to_path: Callable[[str], str]) -> HttpPath:
   prefix: str = request.param['prefix']
   name: str = request.param['name']
 
-  return f'{prefix}{to_path(name)}'
+  return HttpPath(f'{prefix}{to_path(name)}')
 
 
 def file_type(name: str) -> str:
@@ -1055,7 +1058,7 @@ def test_generated(
     generated_mime: str,
     generated_metadata: dict[str, str],
     accept_header: str,
-    request_path: str,
+    request_path: HttpPath,
     img_server: ImgServer,
     field_update: FieldUpdate,
     sqs_message: Optional[dict[str, Any]],
