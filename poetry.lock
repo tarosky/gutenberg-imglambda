@@ -1329,7 +1329,7 @@ version = "1.40.0"
 description = "Type annotations for boto3 S3 1.40.0 service generated with mypy-boto3-builder 8.11.0"
 optional = false
 python-versions = ">=3.8"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "mypy_boto3_s3-1.40.0-py3-none-any.whl", hash = "sha256:5736b7780d57a156312d8d136462c207671d0236b0355704b5754496bb712bc8"},
     {file = "mypy_boto3_s3-1.40.0.tar.gz", hash = "sha256:99a4a27f04d62fe0b31032f274f2e19889fa66424413617a9416873c48567f1d"},
@@ -1341,7 +1341,7 @@ version = "1.40.17"
 description = "Type annotations for boto3 SQS 1.40.17 service generated with mypy-boto3-builder 8.11.0"
 optional = false
 python-versions = ">=3.8"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "mypy_boto3_sqs-1.40.17-py3-none-any.whl", hash = "sha256:f0361de7cec1b82a580d1b02e8135f64006f727b76b324d35c52491dd45f3a32"},
     {file = "mypy_boto3_sqs-1.40.17.tar.gz", hash = "sha256:04de818a43258795c84a093d41d3191c8d89446e8c43fea774f453b8124a7d56"},
@@ -1929,4 +1929,4 @@ platformdirs = ">=3.5.1"
 [metadata]
 lock-version = "2.1"
 python-versions = "~3.13"
-content-hash = "f8643d54d9786d20ddb81544839d56ecab1c1875ac92bc9c7a167a76451ce39e"
+content-hash = "9767a0250e57174b85066bc1693e0894309ec6340eb4c5b054d75e5d051208bf"
