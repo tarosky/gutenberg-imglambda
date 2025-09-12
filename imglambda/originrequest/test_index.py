@@ -1,3 +1,4 @@
+import base64
 import datetime
 import json
 import logging
@@ -6,6 +7,7 @@ import secrets
 import time
 import warnings
 from collections import OrderedDict
+from http import HTTPStatus
 from logging import Logger
 from pathlib import Path
 from typing import (
@@ -25,6 +27,7 @@ import pytest
 from mypy_boto3_sqs.type_defs import MessageTypeDef
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
+from pyvips import Image  # type: ignore
 
 from imglambda.typing import HttpPath
 
@@ -32,9 +35,12 @@ from .index import (
     OPTIMIZE_QUALITY_METADATA,
     OPTIMIZE_TYPE_METADATA,
     TIMESTAMP_METADATA,
+    AcceptHeader,
     FieldUpdate,
     ImgServer,
-    MyJsonFormatter
+    InstantResponse,
+    MyJsonFormatter,
+    OptimImageType
 )
 
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
@@ -61,19 +67,31 @@ JPG_WEBP_NAME_U = 'image.JPG.webp'
 JPG_WEBP_NAME_MB = 'テスト.jpg.webp'
 JPG_WEBP_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg.webp'
 JPG_NOMINIFY_NAME = 'nominify/foo/bar/image.jpg'
+PNG_NAME = 'image.png'
 MIN_CSS_NAME = 'スタイル.min.css'
 MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
+BROKEN_JPG_NAME = 'broken-image.jpg'
 
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
-
-CHROME_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-OLD_SAFARI_ACCEPT_HEADER = 'image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5'
 
 CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
 CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
 
 WEBP_EXTENSION = '.webp'
 AVIF_EXTENSION = '.avif'
+
+OLD_SAFARI_ACCEPT_HEADER = AcceptHeader([False] * len(OptimImageType))
+
+LOADER_MAP = {
+  'jpegload': 'image/jpeg',
+  'jpegload_buffer': 'image/jpeg',
+  'pngload': 'image/png',
+  'pngload_buffer': 'image/png',
+  'webpload': 'image/webp',
+  'webpload_buffer': 'image/webp',
+  'heifload': 'image/avif',
+  'heifload_buffer': 'image/avif',
+}
 
 
 def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
@@ -119,7 +137,8 @@ def create_img_server(
       bypass_path_spec=PathSpec.from_lines(
           GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
       expiration_margin=expiration_margin,
-      basedir=basedir)
+      basedir=basedir,
+      enable_resize=True)
 
 
 def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
@@ -262,7 +281,10 @@ def to_uri(img_server: ImgServer, key_prefix: str) -> Callable[[str], str]:
 @pytest.fixture
 def field_update(
     request: Any, img_server: ImgServer, to_path: Callable[[str], str],
-    to_uri: Callable[[str], str]) -> FieldUpdate:
+    to_uri: Callable[[str], str]) -> Optional[FieldUpdate]:
+  if request.param is None:
+    return None
+
   res_cache_control: Optional[str] = request.param['res_cache_control']
   res_cache_control_overridable: Optional[str] = request.param['res_cache_control_overridable']
   origin_domain: bool = request.param['origin_domain']
@@ -321,6 +343,13 @@ class ExpectedFieldUpdate(TypedDict):
   uri: NotRequired[str | Tuple[bool, str]]
 
 
+class ExpectedInstantResponse(TypedDict):
+  status: int
+  cache_control: str
+  content_type: NotRequired[str]
+  size: NotRequired[Tuple[int, int]]
+
+
 class Config(TypedDict):
   expiration_margin: NotRequired[int]
   basedir: NotRequired[str]
@@ -333,8 +362,10 @@ class Parameters(TypedDict):
       str, str], Callable[[datetime.datetime], datetime.datetime]]
   config: NotRequired[Config]
   request_path: str | tuple[str, str]
-  accept_header: NotRequired[str]
-  expected_field_update: ExpectedFieldUpdate
+  query_string: NotRequired[dict[str, str]]
+  accept_header: NotRequired[AcceptHeader]
+  expected_field_update: NotRequired[ExpectedFieldUpdate]
+  expected_instant_response: NotRequired[ExpectedInstantResponse]
   expected_sqs_message: NotRequired[ExpectedSqsMessage]
 
 
@@ -397,7 +428,7 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
     else:
       raise Exception('system error')
 
-    v['accept_header'] = param.get('accept_header', CHROME_ACCEPT_HEADER)
+    v['accept_header'] = param.get('accept_header', AcceptHeader([True] * len(OptimImageType)))
 
     request_path = param['request_path']
     if isinstance(request_path, str):
@@ -414,6 +445,11 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
         'name': name,
     }
 
+    query_string = param.get('query_string', {})
+    v['query_string'] = {}
+    for key, value in query_string.items():
+      v['query_string'][key] = [value]
+
     config = param.get('config', {})
     indirects.append('img_server')
     v['img_server'] = {
@@ -421,26 +457,35 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
         'basedir': config.get('basedir', ''),
     }
 
-    efu = param['expected_field_update']
-    if 'uri' in efu and isinstance(efu['uri'], str):
-      uri = efu['uri']
-      uri_for_generated = True
-    elif 'uri' in efu and isinstance(efu['uri'], tuple):
-      uri = efu['uri'][1]
-      uri_for_generated = efu['uri'][0]
-    elif 'uri' not in efu:
-      uri = None
-      uri_for_generated = False
-    else:
-      raise Exception('system error')
+    efu = param.get('expected_field_update')
     indirects.append('field_update')
-    v['field_update'] = {
-        'res_cache_control': efu.get('res_cache_control', None),
-        'res_cache_control_overridable': efu.get('res_cache_control_overridable', None),
-        'origin_domain': efu.get('origin_domain', False),
-        'uri': uri,
-        'uri_for_generated': uri_for_generated,
-    }
+    if efu is None:
+      v['field_update'] = None
+    else:
+      if 'uri' in efu and isinstance(efu['uri'], str):
+        uri = efu['uri']
+        uri_for_generated = True
+      elif 'uri' in efu and isinstance(efu['uri'], tuple):
+        uri = efu['uri'][1]
+        uri_for_generated = efu['uri'][0]
+      elif 'uri' not in efu:
+        uri = None
+        uri_for_generated = False
+      else:
+        raise Exception('system error')
+      v['field_update'] = {
+          'res_cache_control': efu.get('res_cache_control', None),
+          'res_cache_control_overridable': efu.get('res_cache_control_overridable', None),
+          'origin_domain': efu.get('origin_domain', False),
+          'uri': uri,
+          'uri_for_generated': uri_for_generated,
+      }
+
+    eir = param.get('expected_instant_response')
+    if eir is None:
+      v['instant_response'] = None
+    else:
+      v['instant_response'] = eir
 
     indirects.append('sqs_message')
     v['sqs_message'] = {
@@ -1049,6 +1094,84 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
                     'res_cache_control_overridable': 'true',
                 },
             },
+            {
+                'id': 'resize/jpg/accepted',
+                'original': JPG_NAME,
+                'generated': None,
+                'request_path': JPG_NAME,
+                'query_string': {
+                    'w': '200',
+                    'h': '150',
+                },
+                'expected_instant_response': {
+                    'status': HTTPStatus.OK,
+                    'content_type': WEBP_MIME,
+                    'cache_control': CACHE_CONTROL_PERM,
+                    'size': (200, 150),
+                },
+            },
+            {
+                'id': 'resize/jpg/unaccepted',
+                'original': JPG_NAME,
+                'generated': None,
+                'request_path': JPG_NAME,
+                'query_string': {
+                    'w': '200',
+                    'h': '150',
+                },
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_instant_response': {
+                    'status': HTTPStatus.OK,
+                    'content_type': JPEG_MIME,
+                    'cache_control': CACHE_CONTROL_PERM,
+                    'size': (200, 150),
+                },
+            },
+            {
+                'id': 'resize/png/accepted',
+                'original': PNG_NAME,
+                'generated': None,
+                'request_path': PNG_NAME,
+                'query_string': {
+                    'w': '200',
+                    'h': '150',
+                },
+                'expected_instant_response': {
+                    'status': HTTPStatus.OK,
+                    'content_type': WEBP_MIME,
+                    'cache_control': CACHE_CONTROL_PERM,
+                    'size': (200, 150),
+                },
+            },
+            {
+                'id': 'resize/png/unaccepted',
+                'original': PNG_NAME,
+                'generated': None,
+                'request_path': PNG_NAME,
+                'query_string': {
+                    'w': '200',
+                    'h': '150',
+                },
+                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
+                'expected_instant_response': {
+                    'status': HTTPStatus.OK,
+                    'content_type': PNG_MIME,
+                    'cache_control': CACHE_CONTROL_PERM,
+                    'size': (200, 150),
+                },
+            },
+            {
+                'id': 'resize/broken-jpg',
+                'original': BROKEN_JPG_NAME,
+                'generated': None,
+                'request_path': BROKEN_JPG_NAME,
+                'expected_field_update': {
+                    'res_cache_control': CACHE_CONTROL_TEMP,
+                },
+                'expected_sqs_message': {
+                    'key': BROKEN_JPG_NAME,
+                },
+            },
         ]))
 def test_generated(
     original_name: Optional[str],
@@ -1057,10 +1180,12 @@ def test_generated(
     generated_name: Optional[str],
     generated_mime: str,
     generated_metadata: dict[str, str],
-    accept_header: str,
+    accept_header: AcceptHeader,
     request_path: HttpPath,
+    query_string: dict[str, list[str]],
     img_server: ImgServer,
-    field_update: FieldUpdate,
+    field_update: Optional[FieldUpdate],
+    instant_response: Optional[ExpectedInstantResponse],
     sqs_message: Optional[dict[str, Any]],
     key_prefix: str,
     modify_ts: Optional[Callable[[datetime.datetime], datetime.datetime]],
@@ -1076,9 +1201,26 @@ def test_generated(
   if generated_name is not None:
     put_generated(img_server, key_prefix, generated_name, generated_mime, ts, generated_metadata)
 
-  update = img_server.process(request_path, accept_header)
+  update = img_server.process(request_path, query_string, accept_header)
 
-  assert field_update == update
+  if field_update is not None:
+    assert isinstance(update, FieldUpdate)
+    assert field_update == update
+
+  if instant_response is not None:
+    assert isinstance(update, InstantResponse)
+    assert update.content_type == instant_response['content_type']
+    assert update.status == instant_response['status']
+    assert update.cache_control == instant_response['cache_control']
+    if update.b64_body is None:
+      assert 'size' not in instant_response
+    else:
+      bs = base64.b64decode(update.b64_body)
+      image = Image.new_from_buffer(bs, '')
+      assert 'size' in instant_response
+      assert instant_response['size'] == (image.get('width'), image.get('height'))
+      assert update.content_type == LOADER_MAP[image.get('vips-loader')]
+
   if sqs_message is None:
     assert receive_sqs_message(img_server) is None
   else:

@@ -2,6 +2,7 @@ from typing import Literal, NewType, NotRequired, ReadOnly, TypedDict
 
 HttpPath = NewType('HttpPath', str)
 S3Key = NewType('S3Key', str)
+FilePath = NewType('FilePath', str)
 
 
 class Header(TypedDict):

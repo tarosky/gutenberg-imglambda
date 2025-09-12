@@ -1,3 +1,4 @@
+import base64
 import dataclasses
 import datetime
 import json
@@ -6,7 +7,10 @@ import os
 import re
 import sys
 from enum import Enum
+from http import HTTPStatus
 from logging import Logger
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Optional, Self
 from urllib import parse
 
@@ -19,9 +23,16 @@ from mypy_boto3_sqs.client import SQSClient
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 from pythonjsonlogger.jsonlogger import JsonFormatter
+from pyvips import Image, Interesting  # type: ignore
 
 import imglambda
-from imglambda.typing import HttpPath, OriginRequestEvent, Request, S3Key
+from imglambda.typing import (
+    HttpPath,
+    OriginRequestEvent,
+    Request,
+    ResponseResult,
+    S3Key
+)
 
 TIMESTAMP_METADATA = 'original-timestamp'
 OPTIMIZE_TYPE_METADATA = 'optimize-type'
@@ -99,6 +110,14 @@ class FieldUpdate:
   uri: Optional[str] = None
 
 
+@dataclasses.dataclass
+class InstantResponse:
+  status: int
+  b64_body: Optional[str]
+  cache_control: str
+  content_type: Optional[str]
+
+
 @dataclasses.dataclass(eq=True, frozen=True)
 class XParams:
   region: str
@@ -111,11 +130,12 @@ class XParams:
   bypass_minifier_patterns: str
   expiration_margin: int
   basedir: str
+  enable_resize: bool
 
 
 class OptimImageType(Enum):
-  WEBP = 1
-  AVIF = 2
+  WEBP = 0
+  AVIF = 1
 
   @classmethod
   def maybe_from_s3_metadata(cls, obj: HeadObjectOutputTypeDef) -> Optional['OptimImageType']:
@@ -145,34 +165,32 @@ class OptimImageType(Enum):
     raise Exception('system error')
 
 
-class AcceptableImages:
-  types: set[OptimImageType]
+class AcceptHeader:
+  types: list[bool]
 
-  def __init__(self, types: set[OptimImageType]):
+  def __init__(self, types: list[bool]):
     self.types = types
 
   @classmethod
-  def from_accept_header(cls, accept_header: str) -> Self:
-    types = set()
+  def from_str(cls, accept_header: str) -> Self:
+    types = [False] * len(OptimImageType)
 
     if 'image/avif' in accept_header:
-      types.add(OptimImageType.AVIF)
+      types[OptimImageType.AVIF.value] = True
 
     if 'image/webp' in accept_header:
-      types.add(OptimImageType.WEBP)
+      types[OptimImageType.WEBP.value] = True
 
     return cls(types)
 
-  def is_supported(self, image_type: OptimImageType) -> bool:
-    return image_type in self.types
+  def supports(self, image_type: OptimImageType) -> bool:
+    return self.types[image_type.value]
 
   def optimizable(self) -> bool:
-    return len(self.types) != 0
+    return any(self.types)
 
   def response_type(self, image_type: OptimImageType) -> Optional[OptimImageType]:
-    if image_type in self.types:
-      return image_type
-    return None
+    return image_type if self.types[image_type.value] else None
 
 
 @dataclasses.dataclass(eq=True, frozen=True)
@@ -237,6 +255,28 @@ def key_from_path(path: HttpPath) -> S3Key:
   return S3Key(parse.unquote(path[1:]))
 
 
+@dataclasses.dataclass(frozen=True)
+class ResizeParam:
+  width: int
+  height: int
+
+  @classmethod
+  def maybe_from_querystring(cls, qs: dict[str, list[str]]) -> Optional['ResizeParam']:
+    if 'w' not in qs or 'h' not in qs:
+      return None
+
+    try:
+      width = int(qs['w'][0])
+      height = int(qs['h'][0])
+    except ValueError:
+      return None
+
+    if width <= 0 or height <= 0:
+      return None
+
+    return cls(width, height)
+
+
 class ImgServer:
   instances: dict[XParams, 'ImgServer'] = {}
 
@@ -255,6 +295,7 @@ class ImgServer:
       bypass_path_spec: Optional[PathSpec],
       expiration_margin: int,
       basedir: str,
+      enable_resize: bool,
   ):
     self.log = log
     self.region = region
@@ -270,7 +311,8 @@ class ImgServer:
     self.bypass_path_spec = bypass_path_spec
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
     self.basedir = basedir
-    self.log_context = {'path': '', 'accept_header': ''}
+    self.enable_resize = enable_resize
+    self.log_context = {'path': '', 'qstr': '', 'accept_header': ''}
 
   @classmethod
   def from_lambda(
@@ -290,6 +332,7 @@ class ImgServer:
       temp_resp_max_age: int = int(get_header(req, 'x-env-temp-resp-max-age'))
       bypass_minifier_patterns: str = get_header_or(req, 'x-env-bypass-minifier-patterns')
       basedir: str = get_header_or(req, 'x-env-basedir')
+      enable_resize: bool = get_header_or(req, 'x-env-enable-resize') == 'true'
     except KeyError as e:
       log.warning({
           'message': 'environment variable not found',
@@ -307,7 +350,8 @@ class ImgServer:
         temp_resp_max_age=temp_resp_max_age,
         bypass_minifier_patterns=bypass_minifier_patterns,
         expiration_margin=expiration_margin,
-        basedir=basedir)
+        basedir=basedir,
+        enable_resize=enable_resize)
 
     if server_key not in cls.instances:
       sqs = boto3.client('sqs', region_name=region)
@@ -328,7 +372,8 @@ class ImgServer:
           temp_resp_max_age=temp_resp_max_age,
           bypass_path_spec=path_spec,
           expiration_margin=expiration_margin,
-          basedir=basedir)
+          basedir=basedir,
+          enable_resize=enable_resize)
 
     return cls.instances[server_key]
 
@@ -434,8 +479,50 @@ class ImgServer:
     self.sqs.send_message(QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
     self.log_debug('enqueued', {'body': body})
 
-  def process_for_image_requester(self, path: HttpPath, accept_header: str) -> FieldUpdate:
-    acceptables = AcceptableImages.from_accept_header(accept_header)
+  def process_resize(self, path: HttpPath, resize_param: ResizeParam,
+                     accept: AcceptHeader) -> Optional[InstantResponse]:
+    key = key_from_path(path)
+    if accept.supports(OptimImageType.WEBP):
+      extension = '.webp'
+      quality = 80
+      content_type = 'image/webp'
+    else:
+      extension = Path(path).suffix
+      quality = 80
+      if extension in ['.jpg', '.jpeg']:
+        content_type = 'image/jpeg'
+      elif extension == '.png':
+        content_type = 'image/png'
+      else:
+        raise Exception('system error')
+
+    with NamedTemporaryFile(delete_on_close=False) as orig:
+      try:
+        self.s3.download_fileobj(self.original_bucket, key, orig)
+      except ClientError as e:
+        if is_not_found_client_error(e):
+          return None
+        raise e
+      orig.close()
+      image: Image = Image.thumbnail(
+          orig.name, resize_param.width, height=resize_param.height, crop=Interesting.CENTRE)
+      resized: bytes = image.write_to_buffer(extension, Q=quality)
+      return InstantResponse(
+          status=HTTPStatus.OK,
+          b64_body=base64.b64encode(resized).decode(),
+          cache_control=f'public, max-age={self.perm_resp_max_age}',
+          content_type=content_type)
+
+  def process_for_image_requester(
+      self, path: HttpPath, qs: dict[str, list[str]],
+      accept_header: AcceptHeader) -> FieldUpdate | InstantResponse:
+    if self.enable_resize:
+      resize_param = ResizeParam.maybe_from_querystring(qs)
+      if resize_param is not None:
+        instant_res = self.process_resize(path, resize_param, accept_header)
+        if instant_res is not None:
+          return instant_res
+
     try:
       now = get_now()
 
@@ -451,7 +538,7 @@ class ImgServer:
         return self.as_temporary(FieldUpdate())
 
       if orig_meta.optimize_type is None:
-        if acceptables.optimizable():
+        if accept_header.optimizable():
           return self.as_temporary(FieldUpdate())
         return self.as_permanent(FieldUpdate())
 
@@ -460,13 +547,13 @@ class ImgServer:
       if orig_meta != gen_meta:
         self.keep_uptodate(key)
 
-      if not acceptables.optimizable():
+      if not accept_header.optimizable():
         return self.as_permanent(FieldUpdate())
 
       updated_path = self.gen_path_from_path(
           HttpPath(f'{path}{orig_meta.optimize_type.extension()}'))
 
-      if acceptables.response_type(orig_meta.optimize_type) is None:
+      if accept_header.response_type(orig_meta.optimize_type) is None:
         return self.as_permanent(self.origin_as_generated(updated_path, FieldUpdate()))
 
       if orig_meta != gen_meta:
@@ -475,7 +562,7 @@ class ImgServer:
       return self.as_permanent(self.origin_as_generated(updated_path, FieldUpdate()))
     except Exception as e:
       self.log_error('error during process_for_image_requester()', {'error': str(e)})
-      if acceptables.optimizable():
+      if accept_header.optimizable():
         return self.as_temporary(FieldUpdate())
       return self.as_permanent(FieldUpdate())
 
@@ -497,7 +584,9 @@ class ImgServer:
       self.log_error('error during process_for_css_requester()', {'error': str(e)})
       return self.as_temporary(FieldUpdate())
 
-  def process(self, path: HttpPath, accept_header: str) -> FieldUpdate:
+  def process(
+      self, path: HttpPath, qs: dict[str, list[str]],
+      accept_header: AcceptHeader) -> FieldUpdate | InstantResponse:
 
     def run(path: HttpPath):
       if self.bypass_path_spec is not None and self.bypass_path_spec.match_file(path):
@@ -505,8 +594,8 @@ class ImgServer:
 
       ext = get_normalized_extension(path)
 
-      if ext in ['.jpg', '.jpeg', '.png', '.gif']:
-        return self.process_for_image_requester(path, accept_header)
+      if ext in ['.jpg', '.jpeg', '.png']:
+        return self.process_for_image_requester(path, qs, accept_header)
       elif ext == '.css':
         return self.process_for_css_requester(path)
       else:
@@ -526,11 +615,11 @@ class ImgServer:
 
     return fu
 
-  def set_log_context(self, path: HttpPath, accept_header: str) -> None:
-    self.log_context = {'path': str(path), 'accept_header': accept_header}
+  def set_log_context(self, path: HttpPath, qstr: str, accept_header: str) -> None:
+    self.log_context = {'path': str(path), 'qstr': qstr, 'accept_header': accept_header}
 
 
-def lambda_main(event: OriginRequestEvent) -> Request:
+def lambda_main(event: OriginRequestEvent) -> Request | ResponseResult:
   req = event['Records'][0]['cf']['request']
   accept_header = req['headers']['accept'][0]['value'] if 'accept' in req['headers'] else ''
 
@@ -543,37 +632,69 @@ def lambda_main(event: OriginRequestEvent) -> Request:
     return req
 
   path = req['uri']
+  qstr = req['querystring']
 
-  server.set_log_context(path, accept_header)
-  field_update = server.process(path, accept_header)
+  server.set_log_context(path, qstr, accept_header)
+  result = server.process(path, parse.parse_qs(qstr), AcceptHeader.from_str(accept_header))
 
-  if field_update.origin_domain is not None:
-    req['origin']['s3']['domainName'] = field_update.origin_domain
-    req['headers']['host'][0]['value'] = field_update.origin_domain
+  if isinstance(result, FieldUpdate):
+    if result.origin_domain is not None:
+      req['origin']['s3']['domainName'] = result.origin_domain
+      req['headers']['host'][0]['value'] = result.origin_domain
 
-  if field_update.uri is not None:
-    req['uri'] = HttpPath(field_update.uri)
+    if result.uri is not None:
+      req['uri'] = HttpPath(result.uri)
 
-  if field_update.res_cache_control is not None:
-    req['headers'][CACHE_CONTROL] = [
-        {
-            'value': field_update.res_cache_control,
+    if result.res_cache_control is not None:
+      req['headers'][CACHE_CONTROL] = [
+          {
+              'value': result.res_cache_control,
+          },
+      ]
+
+    if result.res_cache_control_overridable is not None:
+      req['headers'][OVERRIDABLE] = [
+          {
+              'value': result.res_cache_control_overridable,
+          },
+      ]
+
+    server.log_debug(
+        'done', {
+            'uri': req['uri'],
+            'origin_domain': req['origin']['s3']['domainName'],
+            'res_cache_control': req['headers'][CACHE_CONTROL][0]['value'],
+            'res_cache_control_overridable': req['headers'][OVERRIDABLE][0]['value'],
+        })
+
+    return req
+  elif isinstance(result, InstantResponse):
+    response_result: ResponseResult = {
+        'status': str(result.status),
+        'headers': {
+            'cache-control': [{
+                'value': result.cache_control,
+            }],
         },
-    ]
+    }
 
-  if field_update.res_cache_control_overridable is not None:
-    req['headers'][OVERRIDABLE] = [
-        {
-            'value': field_update.res_cache_control_overridable,
-        },
-    ]
+    if result.content_type is not None:
+      response_result['headers']['content-type'] = [{'value': result.content_type}]
 
-  server.log_debug(
-      'done', {
-          'uri': req['uri'],
-          'origin_domain': req['origin']['s3']['domainName'],
-          'res_cache_control': req['headers'][CACHE_CONTROL][0]['value'],
-          'res_cache_control_overridable': req['headers'][OVERRIDABLE][0]['value'],
-      })
+    if result.b64_body is not None:
+      response_result['body'] = result.b64_body
+      response_result['bodyEncoding'] = 'base64'
 
-  return req
+    server.log_debug(
+        'responded', {
+            'uri': req['uri'],
+            'status': result.status,
+            'cache_control': result.cache_control,
+            'content_type': result.content_type,
+            'approx_image_size': None if result.b64_body is None else int(
+                len(result.b64_body) * 3 / 4),
+        })
+
+    return response_result
+  else:
+    raise Exception('system error')
