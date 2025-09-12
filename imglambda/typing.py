@@ -1,4 +1,8 @@
-from typing import Dict, List, Literal, NotRequired, ReadOnly, TypedDict
+from typing import Literal, NewType, NotRequired, ReadOnly, TypedDict
+
+HttpPath = NewType('HttpPath', str)
+S3Key = NewType('S3Key', str)
+FilePath = NewType('FilePath', str)
 
 
 class Header(TypedDict):
@@ -7,7 +11,7 @@ class Header(TypedDict):
 
 
 class S3Origin(TypedDict):
-  customHeaders: Dict[str, List[Header]]
+  customHeaders: dict[str, list[Header]]
   domainName: str
   path: str
   readTimeout: int
@@ -17,7 +21,7 @@ class S3Origin(TypedDict):
 
 
 class CustomOrigin(TypedDict):
-  customHeaders: Dict[str, List[Header]]
+  customHeaders: dict[str, list[Header]]
   domainName: str
   path: str
   keepaliveTimeout: int
@@ -25,7 +29,7 @@ class CustomOrigin(TypedDict):
   protocol: Literal['http', 'https']
   readTimeout: int
   responseCompletionTimeout: int
-  sslProtocols: List[Literal['TLSv1.2', 'TLSv1.1', 'TLSv1', 'SSLv3']]
+  sslProtocols: list[Literal['TLSv1.2', 'TLSv1.1', 'TLSv1', 'SSLv3']]
 
 
 class Origin(TypedDict):
@@ -41,11 +45,11 @@ class Body(TypedDict):
 
 
 class Request(TypedDict):
-  method: ReadOnly[Literal[
-      'GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE', 'POST', 'PATCH', 'CONNECT']]
-  uri: str
+  method: ReadOnly[Literal['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE', 'POST', 'PATCH',
+                           'CONNECT']]
+  uri: HttpPath
   querystring: str
-  headers: Dict[str, List[Header]]
+  headers: dict[str, list[Header]]
   clientIp: ReadOnly[str]
   body: NotRequired[Body]
   origin: Origin
@@ -68,7 +72,7 @@ class OriginRequestRecordContainer(TypedDict):
 
 
 class OriginRequestEvent(TypedDict):
-  Records: List[OriginRequestRecordContainer]
+  Records: list[OriginRequestRecordContainer]
 
 
 class OriginResponseConfig(TypedDict):
@@ -79,7 +83,7 @@ class OriginResponseConfig(TypedDict):
 
 
 class Response(TypedDict):
-  headers: Dict[str, List[Header]]
+  headers: dict[str, list[Header]]
   status: str
   statusDescription: str
 
@@ -95,12 +99,12 @@ class OriginResponseRecordContainer(TypedDict):
 
 
 class OriginResponseEvent(TypedDict):
-  Records: List[OriginResponseRecordContainer]
+  Records: list[OriginResponseRecordContainer]
 
 
 class ResponseResult(TypedDict):
   body: NotRequired[str]
   bodyEncoding: NotRequired[Literal['text', 'base64']]
-  headers: NotRequired[Dict[str, List[Header]]]
+  headers: NotRequired[dict[str, list[Header]]]
   status: str
   statusDescription: NotRequired[str]
