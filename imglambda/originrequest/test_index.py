@@ -83,14 +83,14 @@ AVIF_EXTENSION = '.avif'
 OLD_SAFARI_ACCEPT_HEADER = AcceptHeader([False] * len(OptimImageType))
 
 LOADER_MAP = {
-  'jpegload': 'image/jpeg',
-  'jpegload_buffer': 'image/jpeg',
-  'pngload': 'image/png',
-  'pngload_buffer': 'image/png',
-  'webpload': 'image/webp',
-  'webpload_buffer': 'image/webp',
-  'heifload': 'image/avif',
-  'heifload_buffer': 'image/avif',
+    'jpegload': 'image/jpeg',
+    'jpegload_buffer': 'image/jpeg',
+    'pngload': 'image/png',
+    'pngload_buffer': 'image/png',
+    'webpload': 'image/webp',
+    'webpload_buffer': 'image/webp',
+    'heifload': 'image/avif',
+    'heifload_buffer': 'image/avif',
 }
 
 
