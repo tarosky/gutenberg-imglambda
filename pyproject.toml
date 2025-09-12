@@ -13,6 +13,8 @@ pathspec = "^0.12.1"
 python-json-logger = "^2.0.7"
 pyvips = { extras = ["binary"], version = "^3.0.0" }
 aws-lambda-powertools = "*"
+mypy-boto3-s3 = "*"
+mypy-boto3-sqs = "*"
 
 [tool.poetry.group.dev.dependencies]
 autopep8 = "*"
@@ -21,8 +23,6 @@ flake8 = "*"
 isort = "*"
 mypy = "*"
 mypy-boto3-builder = "*"
-mypy-boto3-s3 = "*"
-mypy-boto3-sqs = "*"
 pep8 = "*"
 pytest = "*"
 types-python-dateutil = "^2.9.0.20240906"
