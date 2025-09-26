@@ -32,15 +32,18 @@ from pyvips import Image  # type: ignore
 from imglambda.typing import HttpPath
 
 from .index import (
+    FOCALAREA_METADATA,
     OPTIMIZE_QUALITY_METADATA,
     OPTIMIZE_TYPE_METADATA,
+    SUBSIZES_METADATA,
     TIMESTAMP_METADATA,
     AcceptHeader,
+    Area,
     FieldUpdate,
     ImgServer,
     InstantResponse,
     MyJsonFormatter,
-    OptimImageType
+    ResizeMode
 )
 
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
@@ -49,7 +52,6 @@ GENERATED_KEY_PREFIX = 'prefix/'
 REGION = 'us-east-1'
 
 CSS_MIME = 'text/css'
-GIF_MIME = 'image/gif'
 JPEG_MIME = 'image/jpeg'
 PNG_MIME = 'image/png'
 WEBP_MIME = "image/webp"
@@ -72,6 +74,10 @@ MIN_CSS_NAME = 'スタイル.min.css'
 MIN_CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.min.css'
 BROKEN_JPG_NAME = 'broken-image.jpg'
 
+JPG_FACE_AREA = Area(174, 166, 232, 234)
+JPG_FUR_AREA = Area(46, 160, 254, 349)
+JPG_CENTER_AREA = Area(128, 128, 256, 256)
+
 DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
 CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
@@ -80,7 +86,13 @@ CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
 WEBP_EXTENSION = '.webp'
 AVIF_EXTENSION = '.avif'
 
-OLD_SAFARI_ACCEPT_HEADER = AcceptHeader([False] * len(OptimImageType))
+NO_WEBP_NO_AVIF_ACCEPT_HEADER = AcceptHeader.from_str(
+    'image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5')
+
+NO_AVIF_ACCEPT_HEADER = AcceptHeader.from_str(
+    'image/webp,image/png,image/svg+xml,image/*;q=0.8,video/*;q=0.8,*/*;q=0.5')
+
+RECENT_ACCEPT_HEADER = AcceptHeader.from_str('image/avif,image/webp,image/apng,image/*,*/*;q=0.8')
 
 LOADER_MAP = {
     'jpegload': 'image/jpeg',
@@ -91,6 +103,13 @@ LOADER_MAP = {
     'webpload_buffer': 'image/webp',
     'heifload': 'image/avif',
     'heifload_buffer': 'image/avif',
+}
+
+CONTENT_TYPE_MAP = {
+    JPEG_MIME: '.jpg',
+    PNG_MIME: '.png',
+    WEBP_MIME: '.webp',
+    AVIF_MIME: '.avif',
 }
 
 
@@ -111,7 +130,13 @@ def generate_safe_random_string() -> str:
 
 
 def create_img_server(
-    log: Logger, name: str, expiration_margin: int, key_prefix: str, basedir: str) -> ImgServer:
+    log: Logger,
+    name: str,
+    expiration_margin: int,
+    key_prefix: str,
+    basedir: str,
+    resize_mode: ResizeMode,
+) -> ImgServer:
   account_id = read_test_config('aws-account-id')
   sqs_name = f'test-{name}-{generate_safe_random_string()}'
 
@@ -138,7 +163,7 @@ def create_img_server(
           GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
       expiration_margin=expiration_margin,
       basedir=basedir,
-      enable_resize=True)
+      resize_mode=resize_mode)
 
 
 def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
@@ -177,12 +202,17 @@ def put_generated(
     name: str,
     mime: str,
     timestamp: Optional[datetime.datetime],
-    metadata: dict[str, str],
+    metadata: dict[str, Optional[str]],
 ) -> None:
-  metadata2 = {}
+  default_metadata: dict[str, str] = {}
   if timestamp is not None:
-    metadata2[TIMESTAMP_METADATA] = timestamp.astimezone(
+    default_metadata[TIMESTAMP_METADATA] = timestamp.astimezone(
         datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+  if mime == WEBP_MIME:
+    default_metadata[OPTIMIZE_QUALITY_METADATA] = '80'
+
+  md: dict[str, str] = {k: v for k, v in {**default_metadata, **metadata}.items() if v is not None}
 
   with open(f'samplefile/generated/{name}', 'rb') as f:
     img_server.s3.put_object(
@@ -190,10 +220,7 @@ def put_generated(
         Bucket=img_server.generated_bucket,
         ContentType=mime,
         Key=f'{img_server.generated_key_prefix}{key_prefix}{name}',
-        Metadata={
-            **metadata2,
-            **metadata,
-        })
+        Metadata=md)
 
 
 def receive_sqs_message(img_server: ImgServer) -> Optional[dict[str, Any]]:
@@ -210,19 +237,28 @@ def receive_sqs_message(img_server: ImgServer) -> Optional[dict[str, Any]]:
   return json.loads(msgs[0]['Body'])
 
 
+def focalarea(area: Area) -> str:
+  return f'{area.x},{area.y},{area.width},{area.height}'
+
+
 @pytest.fixture
 def key_prefix() -> str:
   return generate_safe_random_string() + '/'
 
 
 @pytest.fixture
-def logger(key_prefix: str) -> Logger:
+def work_dir(key_prefix: str) -> str:
+  dir = f'work/test/imglambda/{key_prefix}'
+  Path(dir).mkdir(parents=True, exist_ok=True)
+
+  return dir
+
+
+@pytest.fixture
+def logger(work_dir: str) -> Logger:
   log = logging.getLogger(__name__)
 
-  log_dir = f'work/test/imglambda/{key_prefix}'
-  Path(log_dir).mkdir(parents=True, exist_ok=True)
-  log_file = open(f'{log_dir}/test.log', 'w')
-
+  log_file = open(f'{work_dir}/test.log', 'w')
   log_handler = logging.StreamHandler()
   log_handler.setFormatter(MyJsonFormatter())
   log_handler.setLevel(logging.DEBUG)
@@ -236,8 +272,10 @@ def logger(key_prefix: str) -> Logger:
 def img_server(request: Any, key_prefix: str, logger: Logger) -> Generator[ImgServer, None, None]:
   expiration_margin: int = request.param['expiration_margin']
   basedir: str = request.param['basedir']
+  resize_mode: ResizeMode = request.param['resize_mode']
 
-  img_server = create_img_server(logger, 'imglambda', expiration_margin, key_prefix, basedir)
+  img_server = create_img_server(
+      logger, 'imglambda', expiration_margin, key_prefix, basedir, resize_mode)
   img_server.sqs.create_queue(QueueName=get_test_sqs_queue_name_from_url(img_server.sqs_queue_url))
 
   yield img_server
@@ -292,6 +330,7 @@ def field_update(
   uri_for_generated: bool = request.param['uri_for_generated']
 
   return FieldUpdate(
+      reason=request.param['reason'],
       res_cache_control=res_cache_control,
       res_cache_control_overridable=res_cache_control_overridable,
       origin_domain=img_server.generated_domain if origin_domain else None,
@@ -337,6 +376,7 @@ class ExpectedSqsMessage(TypedDict):
 
 
 class ExpectedFieldUpdate(TypedDict):
+  reason: str
   res_cache_control: NotRequired[str]
   res_cache_control_overridable: NotRequired[str]
   origin_domain: NotRequired[bool]
@@ -353,13 +393,14 @@ class ExpectedInstantResponse(TypedDict):
 class Config(TypedDict):
   expiration_margin: NotRequired[int]
   basedir: NotRequired[str]
+  resize_mode: NotRequired[ResizeMode]
 
 
 class Parameters(TypedDict):
   id: str
   original: None | str | tuple[str, str] | tuple[str, str, Dict[str, str]]
-  generated: None | str | tuple[str, str] | tuple[str, str, Dict[str, str]] | tuple[str, str, Dict[
-      str, str], Callable[[datetime.datetime], datetime.datetime]]
+  generated: None | str | tuple[str, str] | tuple[str, str, Dict[str, Optional[str]]] | tuple[
+      str, str, Dict[str, Optional[str]], Callable[[datetime.datetime], datetime.datetime]]
   config: NotRequired[Config]
   request_path: str | tuple[str, str]
   query_string: NotRequired[dict[str, str]]
@@ -428,7 +469,7 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
     else:
       raise Exception('system error')
 
-    v['accept_header'] = param.get('accept_header', AcceptHeader([True] * len(OptimImageType)))
+    v['accept_header'] = param.get('accept_header', RECENT_ACCEPT_HEADER)
 
     request_path = param['request_path']
     if isinstance(request_path, str):
@@ -455,6 +496,7 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
     v['img_server'] = {
         'expiration_margin': config.get('expiration_margin', 10),
         'basedir': config.get('basedir', ''),
+        'resize_mode': config.get('resize_mode', ResizeMode.DISABLED),
     }
 
     efu = param.get('expected_field_update')
@@ -474,6 +516,7 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
       else:
         raise Exception('system error')
       v['field_update'] = {
+          'reason': efu['reason'],
           'res_cache_control': efu.get('res_cache_control', None),
           'res_cache_control_overridable': efu.get('res_cache_control_overridable', None),
           'origin_domain': efu.get('origin_domain', False),
@@ -502,684 +545,993 @@ def parameters(params: List[Parameters]) -> Dict[str, Any]:
   }
 
 
-@pytest.mark.parametrize(
-    **parameters(
-        [
-            {
-                'id': 'basedir',
-                'original': JPG_NAME,
-                'generated': JPG_WEBP_NAME,
-                'config': {
-                    'basedir': '/blog',
-                },
-                'request_path': ('/blog', JPG_NAME),
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': f'{JPG_NAME}.webp',
-                },
-            },
-            {
-                'id': 'basedir/bypass',
-                'original': JPG_NAME,
-                'generated': JPG_WEBP_NAME,
-                'config': {
-                    'basedir': '/blog',
-                },
-                'request_path': ('/blog', JPG_NOMINIFY_NAME),  # <-
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'res_cache_control_overridable': 'true',
-                    'uri': (False, JPG_NOMINIFY_NAME),  # <- bypass
-                },
-            },
-            {
-                'id': 'basedir/no_basedir_generated',
-                'original': JPG_NAME,
-                'generated': JPG_WEBP_NAME,
-                'config': {
-                    'basedir': '/blog',
-                },
-                'request_path': ('', JPG_NAME),  # <- has no basedir but still works
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': f'{JPG_NAME}.webp',  # <-
-                },
-            },
-            {
-                'id': 'expired',
-                'original': JPG_NAME,
-                'generated': JPG_WEBP_NAME,
-                'config': {
-                    'expiration_margin': 60 * 60 * 24 * 2,
-                },
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGAcceptedS3EFS_L
-                'id': 'jpg/accepted/gen/orig/l',
-                'original': JPG_NAME,
-                'generated': JPG_WEBP_NAME,
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': f'{JPG_NAME}{WEBP_EXTENSION}',
-                },
-            },
-            {
-                # Test_JPGAcceptedS3EFS_U
-                'id': 'jpg/accepted/gen/orig/u',
-                'original': JPG_NAME_U,
-                'generated': JPG_WEBP_NAME_U,
-                'request_path': JPG_NAME_U,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': f'{JPG_NAME_U}{WEBP_EXTENSION}',
-                },
-            },
-            {
-                # Test_JPGAcceptedS3EFS_MB
-                'id': 'jpg/accepted/gen/orig/mb',
-                'original': JPG_NAME_MB,
-                'generated': JPG_WEBP_NAME_MB,
-                'request_path': JPG_NAME_MB_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': f'{JPG_NAME_MB_Q}{WEBP_EXTENSION}',
-                },
-            },
-            {
-                'id': 'jpg/accepted/gen/orig/avif',
-                'original': (
-                    JPG_NAME, JPEG_MIME, {
-                        OPTIMIZE_TYPE_METADATA: 'avif',
-                        OPTIMIZE_QUALITY_METADATA: '60',
-                    }),
-                'generated': (JPG_AVIF_NAME, AVIF_MIME, {
-                    OPTIMIZE_QUALITY_METADATA: '60',
-                }),
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': f'{JPG_NAME}{AVIF_EXTENSION}',
-                },
-            },
-            {
-                # Test_JPGAcceptedS3NoEFS_L
-                'id': 'jpg/accepted/gen/no_orig/l/webp',
-                'original': None,
-                'generated': JPG_WEBP_NAME,
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                'id': 'jpg/accepted/gen/no_orig/l/avif',
-                'original': None,
-                'generated': JPG_AVIF_NAME,
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGAcceptedS3NoEFS_U
-                'id': 'jpg/accepted/gen/no_orig/u',
-                'original': None,
-                'generated': JPG_WEBP_NAME_U,
-                'request_path': JPG_NAME_U,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_U,
-                },
-            },
-            {
-                # Test_JPGAcceptedS3NoEFS_MB
-                'id': 'jpg/accepted/gen/no_orig/mb',
-                'original': None,
-                'generated': JPG_WEBP_NAME_MB,
-                'request_path': JPG_NAME_MB_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_MB,
-                },
-            },
-            {
-                'id': 'jpg/accepted/quality_mismatch',
-                'original': (
-                    JPG_NAME, JPEG_MIME, {
-                        OPTIMIZE_TYPE_METADATA: 'avif',
-                        OPTIMIZE_QUALITY_METADATA: '60',
-                    }),
-                'generated': (JPG_AVIF_NAME, AVIF_MIME, {
-                    OPTIMIZE_QUALITY_METADATA: '50'
-                }),
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGAcceptedNoS3EFS_L
-                'id': 'jpg/accepted/no_gen/orig/l',
-                'original': JPG_NAME,
-                'generated': None,
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                'id': 'jpg/accepted/no_gen/orig/avif',
-                'original': (
-                    JPG_NAME, JPEG_MIME, {
-                        OPTIMIZE_TYPE_METADATA: 'avif',
-                        OPTIMIZE_QUALITY_METADATA: '60'
-                    }),
-                'generated': None,
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGAcceptedNoS3EFS_U
-                'id': 'jpg/accepted/no_gen/orig/u',
-                'original': JPG_NAME_U,
-                'generated': None,
-                'request_path': JPG_NAME_U,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_U,
-                },
-            },
-            {
-                # Test_JPGAcceptedNoS3EFS_MB
-                'id': 'jpg/accepted/no_gen/orig/mb',
-                'original': JPG_NAME_MB,
-                'generated': None,
-                'request_path': JPG_NAME_MB_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_MB,
-                },
-            },
-            {
-                # Test_JPGAcceptedNoS3NoEFS_L
-                'id': 'jpg/accepted/no_gen/no_orig/l',
-                'original': None,
-                'generated': None,
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_JPGAcceptedNoS3NoEFS_U
-                'id': 'jpg/accepted/no_gen/no_orig/u',
-                'original': None,
-                'generated': None,
-                'request_path': JPG_NAME_U,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_JPGAcceptedNoS3NoEFS_MB
-                'id': 'jpg/accepted/no_gen/no_orig/mb',
-                'original': None,
-                'generated': None,
-                'request_path': JPG_NAME_MB_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_JPGUnacceptedS3EFS_L
-                'id': 'jpg/unaccepted/gen/orig/l',
-                'original': JPG_NAME,
-                'generated': JPG_WEBP_NAME,
-                'request_path': JPG_NAME,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-            },
-            {
-                'id': 'jpg/unaccepted/gen/orig/avif',
-                'original': (
-                    JPG_NAME, JPEG_MIME, {
-                        OPTIMIZE_TYPE_METADATA: 'avif',
-                        OPTIMIZE_QUALITY_METADATA: '60'
-                    }),
-                'generated': (JPG_AVIF_NAME, AVIF_MIME, {
-                    OPTIMIZE_QUALITY_METADATA: '60'
-                }),
-                'request_path': JPG_NAME,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-            },
-            {
-                # Test_JPGUnacceptedS3EFS_U
-                'id': 'jpg/unaccepted/gen/orig/u',
-                'original': JPG_NAME_U,
-                'generated': JPG_WEBP_NAME_U,
-                'request_path': JPG_NAME_U,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-            },
-            {
-                # Test_JPGUnacceptedS3EFS_MB
-                'id': 'jpg/unaccepted/gen/orig/mb',
-                'original': JPG_NAME_MB,
-                'generated': JPG_WEBP_NAME_MB,
-                'request_path': JPG_NAME_MB_Q,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-            },
-            {
-                # Test_JPGUnacceptedS3NoEFS_L
-                'id': 'jpg/unaccepted/gen/no_orig/l',
-                'original': None,
-                'generated': JPG_WEBP_NAME,
-                'request_path': JPG_NAME,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                'id': 'jpg/unaccepted/gen/no_orig/avif',
-                'original': None,
-                'generated': JPG_AVIF_NAME,
-                'request_path': JPG_NAME,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGUnacceptedS3NoEFS_U
-                'id': 'jpg/unaccepted/gen/no_orig/u',
-                'original': None,
-                'generated': JPG_WEBP_NAME_U,
-                'request_path': JPG_NAME_U,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_U,
-                },
-            },
-            {
-                # Test_JPGUnacceptedS3NoEFS_MB
-                'id': 'jpg/unaccepted/gen/no_orig/mb',
-                'original': None,
-                'generated': JPG_WEBP_NAME_MB,
-                'request_path': JPG_NAME_MB_Q,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_MB,
-                },
-            },
-            {
-                # Test_JPGUnacceptedNoS3EFS_L
-                'id': 'jpg/unaccepted/no_gen/orig/l',
-                'original': JPG_NAME,
-                'generated': None,
-                'request_path': JPG_NAME,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGUnacceptedNoS3EFS_U
-                'id': 'jpg/unaccepted/no_gen/orig/u',
-                'original': JPG_NAME_U,
-                'generated': None,
-                'request_path': JPG_NAME_U,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_U,
-                },
-            },
-            {
-                # Test_JPGUnacceptedNoS3EFS_MB
-                'id': 'jpg/unaccepted/no_gen/orig/mb',
-                'original': JPG_NAME_MB,
-                'generated': None,
-                'request_path': JPG_NAME_MB_Q,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_MB,
-                },
-            },
-            {
-                # Test_JPGUnacceptedNoS3NoEFS_L
-                'id': 'jpg/unaccepted/no_gen/no_orig/l',
-                'original': None,
-                'generated': None,
-                'request_path': JPG_NAME,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_JPGUnacceptedNoS3NoEFS_U
-                'id': 'jpg/unaccepted/no_gen/no_orig/u',
-                'original': None,
-                'generated': None,
-                'request_path': JPG_NAME_U,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_JPGUnacceptedNoS3NoEFS_MB
-                'id': 'jpg/unaccepted/no_gen/no_orig/mb',
-                'original': None,
-                'generated': None,
-                'request_path': JPG_NAME_MB_Q,
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_JPGAcceptedS3EFSOld_L
-                'id': 'jpg/accepted/gen/orig/old/l',
-                'original': JPG_NAME,
-                'generated': (JPG_WEBP_NAME, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
-                'request_path': JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME,
-                },
-            },
-            {
-                # Test_JPGAcceptedS3EFSOld_U
-                'id': 'jpg/accepted/gen/orig/old/u',
-                'original': JPG_NAME_U,
-                'generated': (
-                    JPG_WEBP_NAME_U, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
-                'request_path': JPG_NAME_U,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_U,
-                },
-            },
-            {
-                # Test_JPGAcceptedS3EFSOld_MB
-                'id': 'jpg/accepted/gen/orig/old/mb',
-                'original': JPG_NAME_MB,
-                'generated': (
-                    JPG_WEBP_NAME_MB, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
-                'request_path': JPG_NAME_MB_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': JPG_NAME_MB,
-                },
-            },
-            {
-                # Test_CSSS3EFS
-                'id': 'css/gen/orig',
-                'original': CSS_NAME,
-                'generated': CSS_NAME,
-                'request_path': CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'origin_domain': True,
-                    'uri': CSS_NAME_Q,
-                },
-            },
-            {
-                # Test_CSSS3NoEFS
-                'id': 'css/gen/no_orig',
-                'original': None,
-                'generated': CSS_NAME,
-                'request_path': CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': CSS_NAME,
-                },
-            },
-            {
-                # Test_CSSNoS3EFS
-                'id': 'css/no_gen/orig',
-                'original': CSS_NAME,
-                'generated': None,
-                'request_path': CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': CSS_NAME,
-                },
-            },
-            {
-                # Test_CSSNoS3NoEFS
-                'id': 'css/no_gen/no_orig',
-                'original': None,
-                'generated': None,
-                'request_path': CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-            },
-            {
-                # Test_CSSS3EFSOld
-                'id': 'css/gen/orig/old',
-                'original': CSS_NAME,
-                'generated': (CSS_NAME, CSS_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
-                'request_path': CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': CSS_NAME,
-                },
-            },
-            {
-                # Test_MinCSSS3EFS
-                'id': 'min_css/gen/orig',
-                'original': MIN_CSS_NAME,
-                'generated': MIN_CSS_NAME,
-                'request_path': MIN_CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'res_cache_control_overridable': 'true',
-                },
-            },
-            {
-                # Test_MinCSSS3NoEFS
-                'id': 'min_css/gen/no_orig',
-                'original': None,
-                'generated': MIN_CSS_NAME,
-                'request_path': MIN_CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'res_cache_control_overridable': 'true',
-                },
-            },
-            {
-                # Test_MinCSSNoS3EFS
-                'id': 'min_css/no_gen/orig',
-                'original': MIN_CSS_NAME,
-                'generated': None,
-                'request_path': MIN_CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'res_cache_control_overridable': 'true',
-                },
-            },
-            {
-                # Test_MinCSSNoS3NoEFS
-                'id': 'min_css/no_gen/no_orig',
-                'original': None,
-                'generated': None,
-                'request_path': MIN_CSS_NAME_Q,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_PERM,
-                    'res_cache_control_overridable': 'true',
-                },
-            },
-            {
-                'id': 'resize/jpg/accepted',
-                'original': JPG_NAME,
-                'generated': None,
-                'request_path': JPG_NAME,
-                'query_string': {
-                    'w': '200',
-                    'h': '150',
-                },
-                'expected_instant_response': {
-                    'status': HTTPStatus.OK,
-                    'content_type': WEBP_MIME,
-                    'cache_control': CACHE_CONTROL_PERM,
-                    'size': (200, 150),
-                },
-            },
-            {
-                'id': 'resize/jpg/unaccepted',
-                'original': JPG_NAME,
-                'generated': None,
-                'request_path': JPG_NAME,
-                'query_string': {
-                    'w': '200',
-                    'h': '150',
-                },
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_instant_response': {
-                    'status': HTTPStatus.OK,
-                    'content_type': JPEG_MIME,
-                    'cache_control': CACHE_CONTROL_PERM,
-                    'size': (200, 150),
-                },
-            },
-            {
-                'id': 'resize/png/accepted',
-                'original': PNG_NAME,
-                'generated': None,
-                'request_path': PNG_NAME,
-                'query_string': {
-                    'w': '200',
-                    'h': '150',
-                },
-                'expected_instant_response': {
-                    'status': HTTPStatus.OK,
-                    'content_type': WEBP_MIME,
-                    'cache_control': CACHE_CONTROL_PERM,
-                    'size': (200, 150),
-                },
-            },
-            {
-                'id': 'resize/png/unaccepted',
-                'original': PNG_NAME,
-                'generated': None,
-                'request_path': PNG_NAME,
-                'query_string': {
-                    'w': '200',
-                    'h': '150',
-                },
-                'accept_header': OLD_SAFARI_ACCEPT_HEADER,
-                'expected_instant_response': {
-                    'status': HTTPStatus.OK,
-                    'content_type': PNG_MIME,
-                    'cache_control': CACHE_CONTROL_PERM,
-                    'size': (200, 150),
-                },
-            },
-            {
-                'id': 'resize/broken-jpg',
-                'original': BROKEN_JPG_NAME,
-                'generated': None,
-                'request_path': BROKEN_JPG_NAME,
-                'expected_field_update': {
-                    'res_cache_control': CACHE_CONTROL_TEMP,
-                },
-                'expected_sqs_message': {
-                    'key': BROKEN_JPG_NAME,
-                },
-            },
-        ]))
+def optimize_quality_metadata(value: int) -> dict[str, Optional[str]]:
+  return {
+      OPTIMIZE_QUALITY_METADATA: str(value),
+  }
+
+
+TESTS: list[Parameters] = [
+    {
+        'id': 'basedir',
+        'original': JPG_NAME,
+        'generated': JPG_WEBP_NAME,
+        'config': {
+            'basedir': '/blog',
+        },
+        'request_path': ('/blog', JPG_NAME),
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': f'{JPG_NAME}.webp',
+        },
+    },
+    {
+        'id': 'basedir/bypass',
+        'original': JPG_NAME,
+        'generated': JPG_WEBP_NAME,
+        'config': {
+            'basedir': '/blog',
+        },
+        'request_path': ('/blog', JPG_NOMINIFY_NAME),
+        'expected_field_update': {
+            'reason': 'bypassed',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'res_cache_control_overridable': 'true',
+            'uri': (False, JPG_NOMINIFY_NAME),
+        },
+    },
+    {
+        'id': 'basedir/no_basedir_generated',
+        'original': JPG_NAME,
+        'generated': JPG_WEBP_NAME,
+        'config': {
+            'basedir': '/blog',
+        },
+        'request_path': ('', JPG_NAME),
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': f'{JPG_NAME}.webp',
+        },
+    },
+    {
+        'id': 'expired',
+        'original': JPG_NAME,
+        'generated': JPG_WEBP_NAME,
+        'config': {
+            'expiration_margin': 60 * 60 * 24 * 2,
+        },
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        # Test_JPGAcceptedS3EFS_L
+        'id': 'jpg/accepted/gen/orig/l',
+        'original': JPG_NAME,
+        'generated': JPG_WEBP_NAME,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': f'{JPG_NAME}{WEBP_EXTENSION}',
+        },
+    },
+    {
+        # Test_JPGAcceptedS3EFS_U
+        'id': 'jpg/accepted/gen/orig/u',
+        'original': JPG_NAME_U,
+        'generated': JPG_WEBP_NAME_U,
+        'request_path': JPG_NAME_U,
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': f'{JPG_NAME_U}{WEBP_EXTENSION}',
+        },
+    },
+    {
+        # Test_JPGAcceptedS3EFS_MB
+        'id': 'jpg/accepted/gen/orig/mb',
+        'original': JPG_NAME_MB,
+        'generated': JPG_WEBP_NAME_MB,
+        'request_path': JPG_NAME_MB_Q,
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': f'{JPG_NAME_MB_Q}{WEBP_EXTENSION}',
+        },
+    },
+    {
+        'id': 'jpg/accepted/gen/orig/avif',
+        'original': (
+            JPG_NAME, JPEG_MIME, {
+                OPTIMIZE_TYPE_METADATA: 'avif',
+                OPTIMIZE_QUALITY_METADATA: '60',
+            }),
+        'generated': (JPG_AVIF_NAME, AVIF_MIME, optimize_quality_metadata(60)),
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': f'{JPG_NAME}{AVIF_EXTENSION}',
+        },
+    },
+    {
+        # Test_JPGAcceptedS3NoEFS_L
+        'id': 'jpg/accepted/gen/no_orig/l/webp',
+        'original': None,
+        'generated': JPG_WEBP_NAME,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        'id': 'jpg/accepted/gen/no_orig/l/avif',
+        'original': None,
+        'generated': JPG_AVIF_NAME,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        # Test_JPGAcceptedS3NoEFS_U
+        'id': 'jpg/accepted/gen/no_orig/u',
+        'original': None,
+        'generated': JPG_WEBP_NAME_U,
+        'request_path': JPG_NAME_U,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_U,
+        },
+    },
+    {
+        # Test_JPGAcceptedS3NoEFS_MB
+        'id': 'jpg/accepted/gen/no_orig/mb',
+        'original': None,
+        'generated': JPG_WEBP_NAME_MB,
+        'request_path': JPG_NAME_MB_Q,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_MB,
+        },
+    },
+    {
+        'id': 'jpg/accepted/quality_mismatch',
+        'original': (
+            JPG_NAME, JPEG_MIME, {
+                OPTIMIZE_TYPE_METADATA: 'avif',
+                OPTIMIZE_QUALITY_METADATA: '60',
+            }),
+        'generated': (JPG_AVIF_NAME, AVIF_MIME, optimize_quality_metadata(50)),
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'gen is stale',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        # Test_JPGAcceptedNoS3EFS_L
+        'id': 'jpg/accepted/no_gen/orig/l',
+        'original': JPG_NAME,
+        'generated': None,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        'id': 'jpg/accepted/no_gen/orig/avif',
+        'original': (
+            JPG_NAME, JPEG_MIME, {
+                OPTIMIZE_TYPE_METADATA: 'avif',
+                OPTIMIZE_QUALITY_METADATA: '60',
+            }),
+        'generated': None,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        'id': 'jpg/accepted/no_gen/orig/not_optimize',
+        'original': (JPG_NAME, JPEG_MIME, {
+            OPTIMIZE_TYPE_METADATA: 'none',
+        }),
+        'generated': None,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'opt disabled by orig',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        # Test_JPGAcceptedNoS3EFS_U
+        'id': 'jpg/accepted/no_gen/orig/u',
+        'original': JPG_NAME_U,
+        'generated': None,
+        'request_path': JPG_NAME_U,
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_U,
+        },
+    },
+    {
+        # Test_JPGAcceptedNoS3EFS_MB
+        'id': 'jpg/accepted/no_gen/orig/mb',
+        'original': JPG_NAME_MB,
+        'generated': None,
+        'request_path': JPG_NAME_MB_Q,
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_MB,
+        },
+    },
+    {
+        # Test_JPGAcceptedNoS3NoEFS_L
+        'id': 'jpg/accepted/no_gen/no_orig/l',
+        'original': None,
+        'generated': None,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_JPGAcceptedNoS3NoEFS_U
+        'id': 'jpg/accepted/no_gen/no_orig/u',
+        'original': None,
+        'generated': None,
+        'request_path': JPG_NAME_U,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_JPGAcceptedNoS3NoEFS_MB
+        'id': 'jpg/accepted/no_gen/no_orig/mb',
+        'original': None,
+        'generated': None,
+        'request_path': JPG_NAME_MB_Q,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_JPGUnacceptedS3EFS_L
+        'id': 'jpg/unaccepted/gen/orig/l',
+        'original': JPG_NAME,
+        'generated': JPG_WEBP_NAME,
+        'request_path': JPG_NAME,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        'id': 'jpg/unaccepted/gen/orig/avif',
+        'original': (
+            JPG_NAME, JPEG_MIME, {
+                OPTIMIZE_TYPE_METADATA: 'avif',
+                OPTIMIZE_QUALITY_METADATA: '60'
+            }),
+        'generated': (JPG_AVIF_NAME, AVIF_MIME, optimize_quality_metadata(60)),
+        'request_path': JPG_NAME,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        'id': 'jpg/unaccepted/gen/orig/avif/onlywebp',
+        'original': (
+            JPG_NAME, JPEG_MIME, {
+                OPTIMIZE_TYPE_METADATA: 'avif',
+                OPTIMIZE_QUALITY_METADATA: '60'
+            }),
+        'generated': (JPG_AVIF_NAME, AVIF_MIME, optimize_quality_metadata(60)),
+        'request_path': JPG_NAME,
+        'accept_header': NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        # Test_JPGUnacceptedS3EFS_U
+        'id': 'jpg/unaccepted/gen/orig/u',
+        'original': JPG_NAME_U,
+        'generated': JPG_WEBP_NAME_U,
+        'request_path': JPG_NAME_U,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        # Test_JPGUnacceptedS3EFS_MB
+        'id': 'jpg/unaccepted/gen/orig/mb',
+        'original': JPG_NAME_MB,
+        'generated': JPG_WEBP_NAME_MB,
+        'request_path': JPG_NAME_MB_Q,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        # Test_JPGUnacceptedS3NoEFS_L
+        'id': 'jpg/unaccepted/gen/no_orig/l',
+        'original': None,
+        'generated': JPG_WEBP_NAME,
+        'request_path': JPG_NAME,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        'id': 'jpg/unaccepted/gen/no_orig/avif',
+        'original': None,
+        'generated': JPG_AVIF_NAME,
+        'request_path': JPG_NAME,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        # Test_JPGUnacceptedS3NoEFS_U
+        'id': 'jpg/unaccepted/gen/no_orig/u',
+        'original': None,
+        'generated': JPG_WEBP_NAME_U,
+        'request_path': JPG_NAME_U,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_U,
+        },
+    },
+    {
+        # Test_JPGUnacceptedS3NoEFS_MB
+        'id': 'jpg/unaccepted/gen/no_orig/mb',
+        'original': None,
+        'generated': JPG_WEBP_NAME_MB,
+        'request_path': JPG_NAME_MB_Q,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_MB,
+        },
+    },
+    {
+        # Test_JPGUnacceptedNoS3EFS_L
+        'id': 'jpg/unaccepted/no_gen/orig/l',
+        'original': JPG_NAME,
+        'generated': None,
+        'request_path': JPG_NAME,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        # Test_JPGUnacceptedNoS3EFS_U
+        'id': 'jpg/unaccepted/no_gen/orig/u',
+        'original': JPG_NAME_U,
+        'generated': None,
+        'request_path': JPG_NAME_U,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_U,
+        },
+    },
+    {
+        # Test_JPGUnacceptedNoS3EFS_MB
+        'id': 'jpg/unaccepted/no_gen/orig/mb',
+        'original': JPG_NAME_MB,
+        'generated': None,
+        'request_path': JPG_NAME_MB_Q,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'opt not accepted',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_MB,
+        },
+    },
+    {
+        # Test_JPGUnacceptedNoS3NoEFS_L
+        'id': 'jpg/unaccepted/no_gen/no_orig/l',
+        'original': None,
+        'generated': None,
+        'request_path': JPG_NAME,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_JPGUnacceptedNoS3NoEFS_U
+        'id': 'jpg/unaccepted/no_gen/no_orig/u',
+        'original': None,
+        'generated': None,
+        'request_path': JPG_NAME_U,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_JPGUnacceptedNoS3NoEFS_MB
+        'id': 'jpg/unaccepted/no_gen/no_orig/mb',
+        'original': None,
+        'generated': None,
+        'request_path': JPG_NAME_MB_Q,
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_JPGAcceptedS3EFSOld_L
+        'id': 'jpg/accepted/gen/orig/old/l',
+        'original': JPG_NAME,
+        'generated': (JPG_WEBP_NAME, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'gen is stale',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME,
+        },
+    },
+    {
+        # Test_JPGAcceptedS3EFSOld_U
+        'id': 'jpg/accepted/gen/orig/old/u',
+        'original': JPG_NAME_U,
+        'generated': (JPG_WEBP_NAME_U, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+        'request_path': JPG_NAME_U,
+        'expected_field_update': {
+            'reason': 'gen is stale',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_U,
+        },
+    },
+    {
+        # Test_JPGAcceptedS3EFSOld_MB
+        'id': 'jpg/accepted/gen/orig/old/mb',
+        'original': JPG_NAME_MB,
+        'generated': (JPG_WEBP_NAME_MB, JPEG_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+        'request_path': JPG_NAME_MB_Q,
+        'expected_field_update': {
+            'reason': 'gen is stale',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': JPG_NAME_MB,
+        },
+    },
+    {
+        'id': 'jpg/no_opt/no_gen/orig',
+        'original': (JPG_NAME, JPEG_MIME, {
+            OPTIMIZE_TYPE_METADATA: 'none',
+        }),
+        'generated': None,
+        'request_path': JPG_NAME,
+        'expected_field_update': {
+            'reason': 'opt disabled by orig',
+            'res_cache_control': CACHE_CONTROL_PERM,
+        },
+    },
+    {
+        # Test_CSSS3EFS
+        'id': 'css/gen/orig',
+        'original': CSS_NAME,
+        'generated': CSS_NAME,
+        'request_path': CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'gen found',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'origin_domain': True,
+            'uri': CSS_NAME_Q,
+        },
+    },
+    {
+        # Test_CSSS3NoEFS
+        'id': 'css/gen/no_orig',
+        'original': None,
+        'generated': CSS_NAME,
+        'request_path': CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': CSS_NAME,
+        },
+    },
+    {
+        # Test_CSSNoS3EFS
+        'id': 'css/no_gen/orig',
+        'original': CSS_NAME,
+        'generated': None,
+        'request_path': CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': CSS_NAME,
+        },
+    },
+    {
+        # Test_CSSNoS3NoEFS
+        'id': 'css/no_gen/no_orig',
+        'original': None,
+        'generated': None,
+        'request_path': CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        # Test_CSSS3EFSOld
+        'id': 'css/gen/orig/old',
+        'original': CSS_NAME,
+        'generated': (CSS_NAME, CSS_MIME, {}, lambda ts: ts - datetime.timedelta(1)),
+        'request_path': CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'gen is stale',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': CSS_NAME,
+        },
+    },
+    {
+        # Test_MinCSSS3EFS
+        'id': 'min_css/gen/orig',
+        'original': MIN_CSS_NAME,
+        'generated': MIN_CSS_NAME,
+        'request_path': MIN_CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'noprocess',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'res_cache_control_overridable': 'true',
+        },
+    },
+    {
+        # Test_MinCSSS3NoEFS
+        'id': 'min_css/gen/no_orig',
+        'original': None,
+        'generated': MIN_CSS_NAME,
+        'request_path': MIN_CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'noprocess',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'res_cache_control_overridable': 'true',
+        },
+    },
+    {
+        # Test_MinCSSNoS3EFS
+        'id': 'min_css/no_gen/orig',
+        'original': MIN_CSS_NAME,
+        'generated': None,
+        'request_path': MIN_CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'noprocess',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'res_cache_control_overridable': 'true',
+        },
+    },
+    {
+        # Test_MinCSSNoS3NoEFS
+        'id': 'min_css/no_gen/no_orig',
+        'original': None,
+        'generated': None,
+        'request_path': MIN_CSS_NAME_Q,
+        'expected_field_update': {
+            'reason': 'noprocess',
+            'res_cache_control': CACHE_CONTROL_PERM,
+            'res_cache_control_overridable': 'true',
+        },
+    },
+    {
+        'id': 'resize_freestyle/jpg/accepted',
+        'original': JPG_NAME,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (200, 150),
+        },
+    },
+    {
+        'id': 'resize_freestyle/jpg/unaccepted',
+        'original': JPG_NAME,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': JPEG_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (200, 150),
+        },
+    },
+    {
+        'id': 'resize_freestyle/png/accepted',
+        'original': PNG_NAME,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': PNG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (200, 150),
+        },
+    },
+    {
+        'id': 'resize_freestyle/png/unaccepted',
+        'original': PNG_NAME,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': PNG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'accept_header': NO_WEBP_NO_AVIF_ACCEPT_HEADER,
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': PNG_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (200, 150),
+        },
+    },
+    {
+        'id': 'resize_freestyle/notfound',
+        'original': None,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        'id': 'resize/broken_jpg',
+        'original': BROKEN_JPG_NAME,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': BROKEN_JPG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'expected_field_update': {
+            'reason': 'no gen',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+        'expected_sqs_message': {
+            'key': BROKEN_JPG_NAME,
+        },
+    },
+    {
+        'id': 'focus/resize',
+        'original': (JPG_NAME, JPEG_MIME, {
+            FOCALAREA_METADATA: focalarea(JPG_FACE_AREA),
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (200, 150),
+        },
+    },
+    {
+        'id': 'focus/noresize',
+        'original': (JPG_NAME, JPEG_MIME, {
+            FOCALAREA_METADATA: focalarea(JPG_FACE_AREA),
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '300',
+            'h': '300',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (300, 300),
+        },
+    },
+    {
+        'id': 'focus/thin/nopadding',
+        'original': (JPG_NAME, JPEG_MIME, {
+            FOCALAREA_METADATA: focalarea(JPG_FACE_AREA),
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '100',
+            'h': '400',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (100, 400),
+        },
+    },
+    {
+        'id': 'focus/padding',
+        'original': (JPG_NAME, JPEG_MIME, {
+            FOCALAREA_METADATA: focalarea(JPG_FACE_AREA),
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '600',
+            'h': '600',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (600, 600),
+        },
+    },
+    {
+        'id': 'focus/biased',
+        'original': (JPG_NAME, JPEG_MIME, {
+            FOCALAREA_METADATA: focalarea(JPG_FUR_AREA),
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '300',
+            'h': '300',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (300, 300),
+        },
+    },
+    {
+        'id': 'focus/symmetry',
+        'original': (JPG_NAME, JPEG_MIME, {
+            FOCALAREA_METADATA: focalarea(JPG_CENTER_AREA),
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': JPG_NAME,
+        'query_string': {
+            'w': '300',
+            'h': '300',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (300, 300),
+        },
+    },
+    {
+        'id': 'resize_strict/subsize_exists',
+        'original': ('image.jpg', JPEG_MIME, {
+            SUBSIZES_METADATA: '300x200,400x300',
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.STRICT,
+        },
+        'request_path': 'image-400x300.jpg',
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (400, 300),
+        },
+    },
+    {
+        'id': 'resize_strict/subsize_notexist',
+        'original': ('image.jpg', JPEG_MIME, {
+            SUBSIZES_METADATA: '300x200,400x300',
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.STRICT,
+        },
+        'request_path': 'image-500x400.jpg',
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        'id': 'resize_strict/metadata_notexist',
+        'original': 'image.jpg',
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.STRICT,
+        },
+        'request_path': 'image-400x300.jpg',
+        'expected_field_update': {
+            'reason': 'no orig',
+            'res_cache_control': CACHE_CONTROL_TEMP,
+        },
+    },
+    {
+        'id': 'resize_relaxed/subsize_notexist',
+        'original': ('image.jpg', JPEG_MIME, {
+            SUBSIZES_METADATA: '300x200,400x300',
+        }),
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.RELAXED,
+        },
+        'request_path': 'image-500x400.jpg',
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (500, 400),
+        },
+    },
+]
+
+
+@pytest.mark.parametrize(**parameters(TESTS))
 def test_generated(
     original_name: Optional[str],
     original_mime: str,
     original_metadata: dict[str, str],
     generated_name: Optional[str],
     generated_mime: str,
-    generated_metadata: dict[str, str],
+    generated_metadata: dict[str, Optional[str]],
     accept_header: AcceptHeader,
     request_path: HttpPath,
     query_string: dict[str, list[str]],
@@ -1189,6 +1541,7 @@ def test_generated(
     sqs_message: Optional[dict[str, Any]],
     key_prefix: str,
     modify_ts: Optional[Callable[[datetime.datetime], datetime.datetime]],
+    work_dir: str,
 ) -> None:
   if original_name is None:
     ts = DUMMY_DATETIME
@@ -1218,8 +1571,14 @@ def test_generated(
       bs = base64.b64decode(update.b64_body)
       image = Image.new_from_buffer(bs, '')
       assert 'size' in instant_response
+
+      content_type = LOADER_MAP[image.get('vips-loader')]
+      assert update.content_type == content_type
+
+      with open(f'{work_dir}/response{CONTENT_TYPE_MAP[content_type]}', 'wb') as f:
+        f.write(bs)
+
       assert instant_response['size'] == (image.get('width'), image.get('height'))
-      assert update.content_type == LOADER_MAP[image.get('vips-loader')]
 
   if sqs_message is None:
     assert receive_sqs_message(img_server) is None
