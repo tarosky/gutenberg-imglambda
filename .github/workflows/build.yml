@@ -114,7 +114,7 @@ jobs:
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
         asset_path: ./imglambda.zip
-        asset_name: imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
+        asset_name: imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-amd64.zip
         asset_content_type: application/octet-stream
     - uses: aws-actions/configure-aws-credentials@main
       with:
