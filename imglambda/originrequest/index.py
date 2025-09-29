@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from enum import Enum
 from http import HTTPStatus
 from logging import Logger
@@ -27,7 +28,7 @@ from mypy_boto3_sqs.client import SQSClient
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 from pythonjsonlogger.jsonlogger import JsonFormatter
-from pyvips import Extend, Image, Interesting  # type: ignore
+from pyvips import Extend, Image  # type: ignore
 
 import imglambda
 from imglambda.typing import (
@@ -47,6 +48,7 @@ OVERRIDABLE = 'x-res-cache-control-overridable'
 CACHE_CONTROL = 'x-res-cache-control'
 
 LAMBDA_EXPIRATION_MARGIN = 60
+RESPONSE_BODY_LIMIT = 1024 * 1024
 
 PADDING_COLOR = [230.0, 230.0, 230.0]
 
@@ -123,7 +125,7 @@ class FieldUpdate:
 @dataclasses.dataclass(frozen=True)
 class InstantResponse:
   status: int
-  b64_body: Optional[str]
+  body: Optional[bytes | str]
   cache_control: str
   content_type: Optional[str]
   vips_us: Optional[int]
@@ -146,6 +148,7 @@ class XParams:
   sqs_queue_url: str
   perm_resp_max_age: int
   temp_resp_max_age: int
+  error_max_age: int
   bypass_minifier_patterns: str
   expiration_margin: int
   basedir: str
@@ -216,18 +219,18 @@ class Area:
 
   @classmethod
   def create(cls, x: int, y: int, width: int, height: int) -> 'Area':
-    if x < 0 or y < 0 or width < 0 or height < 0:
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
       raise ValueError(f'Invalid argument: x: {x}, y: {y}, width: {width}, height: {height}')
 
     return cls(x, y, width, height)
 
   @property
   def right(self) -> int:
-    return self.x + self.width
+    return self.x + self.width - 1
 
   @property
   def bottom(self) -> int:
-    return self.y + self.height
+    return self.y + self.height - 1
 
   def is_in(self, frame: Size) -> bool:
     return self.right < frame.width and self.bottom < frame.height
@@ -235,13 +238,20 @@ class Area:
   def scale(self, numerator: int, denominator: int) -> 'Area':
     x = self.x * numerator // denominator
     y = self.y * numerator // denominator
-    width = ((self.x + self.width) * numerator // denominator) - x
-    height = ((self.y + self.height) * numerator // denominator) - y
+    right = self.right * numerator // denominator
+    bottom = self.bottom * numerator // denominator
 
-    return Area(x, y, width, height)
+    return Area(x, y, right - x + 1, bottom - y + 1)
 
   def to_size(self) -> Size:
     return Size(self.width, self.height)
+
+  def fit_into(self, container: Size) -> 'Area':
+    return Area(
+        x=self.x,
+        y=self.y,
+        width=min(self.width, container.width - self.x),
+        height=min(self.width, container.height - self.y))
 
 
 @dataclasses.dataclass(eq=True, frozen=True)
@@ -413,7 +423,7 @@ def distribute_margin(lower_space: int, upper_space: int, margin: int) -> Tuple[
   if lower_space + upper_space < margin:
     remainder = margin - lower_space - upper_space
 
-    # Blank areas are distributed equally.
+    # Padding areas are distributed equally.
     q, mod = divmod(remainder, 2)
     lower_addition = lower_space + q
     upper_addition = upper_space + q + mod
@@ -421,6 +431,9 @@ def distribute_margin(lower_space: int, upper_space: int, margin: int) -> Tuple[
     q, mod = divmod(margin, 2)
     lower_addition = q
     upper_addition = q + mod
+  elif lower_space + upper_space == 0:
+    lower_addition = 0
+    upper_addition = 0
   else:
     space = lower_space + upper_space
     lower_addition = (margin * lower_space) // space
@@ -508,11 +521,11 @@ def calc_resize_scale(original: Size, target: Size, focalarea: Area) -> Optional
 def calc_crop(resized: Size, target: Size, resized_focalarea: Area) -> Area:
   left_addition, right_addition = distribute_margin(
       lower_space=resized_focalarea.x,
-      upper_space=resized.width - resized_focalarea.right,
+      upper_space=resized.width - resized_focalarea.width - resized_focalarea.x,
       margin=target.width - resized_focalarea.width)
   top_addition, bottom_addition = distribute_margin(
       lower_space=resized_focalarea.y,
-      upper_space=resized.height - resized_focalarea.bottom,
+      upper_space=resized.height - resized_focalarea.height - resized_focalarea.y,
       margin=target.height - resized_focalarea.height)
 
   return Area(
@@ -525,18 +538,15 @@ def calc_crop(resized: Size, target: Size, resized_focalarea: Area) -> Area:
 def calc_padding(resized: Size, croparea: Area) -> Tuple[FourSides, Area]:
   padding = FourSides(
       left=max(0, -croparea.x),
-      right=max(0, croparea.right - resized.width),
+      right=max(0, croparea.width - resized.width + croparea.x),
       top=max(0, -croparea.y),
-      bottom=max(0, croparea.bottom - resized.height))
-
-  x = croparea.x + padding.left
-  y = croparea.y + padding.top
+      bottom=max(0, croparea.height - resized.height + croparea.y))
 
   padded = Area(
-      x=x,
-      y=y,
-      width=croparea.right - padding.right - x,
-      height=croparea.bottom - padding.bottom - y)
+      x=croparea.x + padding.left,
+      y=croparea.y + padding.top,
+      width=croparea.width - padding.right - padding.left,
+      height=croparea.height - padding.bottom - padding.top)
 
   return padding, padded
 
@@ -602,6 +612,7 @@ class ImgServer:
       sqs_queue_url: str,
       perm_resp_max_age: int,
       temp_resp_max_age: int,
+      error_max_age: int,
       bypass_path_spec: Optional[PathSpec],
       expiration_margin: int,
       basedir: str,
@@ -618,6 +629,7 @@ class ImgServer:
     self.sqs_queue_url = sqs_queue_url
     self.perm_resp_max_age = perm_resp_max_age
     self.temp_resp_max_age = temp_resp_max_age
+    self.error_max_age = error_max_age
     self.bypass_path_spec = bypass_path_spec
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
     self.basedir = basedir
@@ -625,6 +637,7 @@ class ImgServer:
     self.log_context = {'path': '', 'qstr': '', 'accept_header': ''}
     self.cache_control_perm = f'public, max-age={self.perm_resp_max_age}'
     self.cache_control_temp = f'public, max-age={self.temp_resp_max_age}'
+    self.cache_control_error = f'public, max-age={self.error_max_age}'
 
   @classmethod
   def from_lambda(
@@ -642,6 +655,7 @@ class ImgServer:
       sqs_queue_url = get_header(req, 'x-env-sqs-queue-url')
       perm_resp_max_age = int(get_header(req, 'x-env-perm-resp-max-age'))
       temp_resp_max_age = int(get_header(req, 'x-env-temp-resp-max-age'))
+      error_max_age = int(get_header(req, 'x-env-error-max-age'))
       bypass_minifier_patterns = get_header_or(req, 'x-env-bypass-minifier-patterns')
       basedir = get_header_or(req, 'x-env-basedir')
       resize_mode = ResizeMode[get_header_or(req, 'x-env-resize-mode', 'Disabled').upper()]
@@ -660,6 +674,7 @@ class ImgServer:
         sqs_queue_url=sqs_queue_url,
         perm_resp_max_age=perm_resp_max_age,
         temp_resp_max_age=temp_resp_max_age,
+        error_max_age=error_max_age,
         bypass_minifier_patterns=bypass_minifier_patterns,
         expiration_margin=expiration_margin,
         basedir=basedir,
@@ -682,6 +697,7 @@ class ImgServer:
           sqs_queue_url=sqs_queue_url,
           perm_resp_max_age=perm_resp_max_age,
           temp_resp_max_age=temp_resp_max_age,
+          error_max_age=error_max_age,
           bypass_path_spec=path_spec,
           expiration_margin=expiration_margin,
           basedir=basedir,
@@ -778,15 +794,26 @@ class ImgServer:
     self.sqs.send_message(QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
     self.log_debug('enqueued', {'body': body})
 
-  def resize_image(self, filename: str, target: Size, focalarea: Optional[Area]) -> Optional[Image]:
-    if focalarea is None:
-      return Image.thumbnail(filename, target.width, height=target.height, crop=Interesting.CENTRE)
-
+  def resize_image(
+      self,
+      filename: str,
+      target: Size,
+      focalarea: Optional[Area],
+  ) -> Image | InstantResponse | None:
     image: Image = Image.new_from_file(filename)
     original = Size.from_image(image)
 
+    if focalarea is None:
+      focalarea = Area(0, 0, original.width, original.height)
+
     if not focalarea.is_in(original):
-      return None
+      return InstantResponse(
+          status=HTTPStatus.INTERNAL_SERVER_ERROR,
+          body='Invalid metadata',
+          cache_control=self.cache_control_error,
+          content_type='text/plain',
+          vips_us=None,
+          img_size=None)
 
     scale = calc_resize_scale(original, target, focalarea)
     if scale is None:
@@ -796,7 +823,7 @@ class ImgServer:
       assert scale[0] < scale[1]
       image = image.resize(scale[0] / scale[1])
       resized = Size.from_image(image)
-      resized_focalarea = focalarea.scale(scale[0], scale[1])
+      resized_focalarea = focalarea.scale(scale[0], scale[1]).fit_into(resized)
 
     croparea = calc_crop(resized, target, resized_focalarea)
     padding, padded = calc_padding(resized, croparea)
@@ -856,7 +883,13 @@ class ImgServer:
           orig.write(chunk)
       except ClientError as e:
         if is_not_found_client_error(e):
-          return None
+          return InstantResponse(
+              status=HTTPStatus.NOT_FOUND,
+              body='Image file not found',
+              cache_control=self.cache_control_error,
+              content_type='text/plain',
+              vips_us=None,
+              img_size=None)
         raise e
       orig.close()
 
@@ -864,7 +897,13 @@ class ImgServer:
         orig_meta = ObjectMeta.from_original_object(res)
       except InvalidMetadata as e:
         self.log_warning('failed to read orig metadata', {'reason': str(e), 'key': key})
-        return None
+        return InstantResponse(
+            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            body='Invalid metadata',
+            cache_control=self.cache_control_error,
+            content_type='text/plain',
+            vips_us=None,
+            img_size=None)
 
       target = Size(resize_param.width, resize_param.height)
       if strict and target not in orig_meta.subsizes:
@@ -879,20 +918,42 @@ class ImgServer:
           case Image() as image:
             resized: bytes = image.write_to_buffer(extension, Q=quality)
 
+            if RESPONSE_BODY_LIMIT < len(resized):
+              return InstantResponse(
+                  status=HTTPStatus.BAD_REQUEST,
+                  body='Response size too large',
+                  cache_control=self.cache_control_error,
+                  content_type='text/plain',
+                  vips_us=None,
+                  img_size=None)
+
             vips_us = (time.time_ns() - start_ns) // 1000
 
             return InstantResponse(
                 status=HTTPStatus.OK,
-                b64_body=base64.b64encode(resized).decode(),
-                cache_control=f'public, max-age={self.perm_resp_max_age}',
+                body=resized,
+                cache_control=self.cache_control_perm,
                 content_type=content_type,
                 vips_us=vips_us,
                 img_size=len(resized))
+          case InstantResponse() as response:
+            return response
           case _:
             raise Exception('system error')
       except Exception as e:
-        self.log_warning('failed to resize', {'reason': str(e), 'key': key})
-        return None
+        self.log_warning(
+            'failed to resize', {
+                'reason': str(e),
+                'key': key,
+                'traceback': traceback.format_exc(),
+            })
+        return InstantResponse(
+            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            body='Invalid image file',
+            cache_control=self.cache_control_error,
+            content_type='text/plain',
+            vips_us=None,
+            img_size=None)
 
   def process_for_image_requester(
       self,
@@ -1102,9 +1163,17 @@ def lambda_main(event: OriginRequestEvent) -> Request | ResponseResult:
     if result.content_type is not None:
       response_result['headers']['content-type'] = [{'value': result.content_type}]
 
-    if result.b64_body is not None:
-      response_result['body'] = result.b64_body
-      response_result['bodyEncoding'] = 'base64'
+    match result.body:
+      case None:
+        pass
+      case str():
+        response_result['body'] = result.body
+        response_result['bodyEncoding'] = 'text'
+      case bytes():
+        response_result['body'] = base64.b64encode(result.body).decode()
+        response_result['bodyEncoding'] = 'base64'
+      case _:
+        raise Exception('system error')
 
     server.log_debug(
         'responded', {

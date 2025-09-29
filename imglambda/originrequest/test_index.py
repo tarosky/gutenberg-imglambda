@@ -1,4 +1,3 @@
-import base64
 import datetime
 import json
 import logging
@@ -48,6 +47,7 @@ from .index import (
 
 PERM_RESP_MAX_AGE = 365 * 24 * 60 * 60
 TEMP_RESP_MAX_AGE = 20 * 60
+ERROR_MAX_AGE = 60
 GENERATED_KEY_PREFIX = 'prefix/'
 REGION = 'us-east-1'
 
@@ -56,6 +56,7 @@ JPEG_MIME = 'image/jpeg'
 PNG_MIME = 'image/png'
 WEBP_MIME = "image/webp"
 AVIF_MIME = "image/avif"
+TEXT_MIME = 'text/plain'
 
 CSS_NAME = 'スタイル.css'
 CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.css'
@@ -82,6 +83,7 @@ DUMMY_DATETIME = datetime.datetime(2000, 1, 1)
 
 CACHE_CONTROL_PERM = f'public, max-age={PERM_RESP_MAX_AGE}'
 CACHE_CONTROL_TEMP = f'public, max-age={TEMP_RESP_MAX_AGE}'
+CACHE_CONTROL_ERROR = f'public, max-age={ERROR_MAX_AGE}'
 
 WEBP_EXTENSION = '.webp'
 AVIF_EXTENSION = '.avif'
@@ -159,6 +161,7 @@ def create_img_server(
       sqs_queue_url=f'https://sqs.{REGION}.amazonaws.com/{account_id}/{sqs_name}',
       perm_resp_max_age=PERM_RESP_MAX_AGE,
       temp_resp_max_age=TEMP_RESP_MAX_AGE,
+      error_max_age=ERROR_MAX_AGE,
       bypass_path_spec=PathSpec.from_lines(
           GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
       expiration_margin=expiration_margin,
@@ -1308,9 +1311,10 @@ TESTS: list[Parameters] = [
             'w': '200',
             'h': '150',
         },
-        'expected_field_update': {
-            'reason': 'no orig',
-            'res_cache_control': CACHE_CONTROL_TEMP,
+        'expected_instant_response': {
+            'status': HTTPStatus.NOT_FOUND,
+            'content_type': TEXT_MIME,
+            'cache_control': CACHE_CONTROL_ERROR,
         },
     },
     {
@@ -1325,12 +1329,10 @@ TESTS: list[Parameters] = [
             'w': '200',
             'h': '150',
         },
-        'expected_field_update': {
-            'reason': 'no gen',
-            'res_cache_control': CACHE_CONTROL_TEMP,
-        },
-        'expected_sqs_message': {
-            'key': BROKEN_JPG_NAME,
+        'expected_instant_response': {
+            'status': HTTPStatus.INTERNAL_SERVER_ERROR,
+            'content_type': TEXT_MIME,
+            'cache_control': CACHE_CONTROL_ERROR,
         },
     },
     {
@@ -1565,20 +1567,25 @@ def test_generated(
     assert update.content_type == instant_response['content_type']
     assert update.status == instant_response['status']
     assert update.cache_control == instant_response['cache_control']
-    if update.b64_body is None:
-      assert 'size' not in instant_response
-    else:
-      bs = base64.b64decode(update.b64_body)
-      image = Image.new_from_buffer(bs, '')
-      assert 'size' in instant_response
 
-      content_type = LOADER_MAP[image.get('vips-loader')]
-      assert update.content_type == content_type
+    match update.body:
+      case None:
+        assert 'size' not in instant_response
+      case str():
+        assert 'size' not in instant_response
+      case bytes():
+        image = Image.new_from_buffer(update.body, '')
+        assert 'size' in instant_response
 
-      with open(f'{work_dir}/response{CONTENT_TYPE_MAP[content_type]}', 'wb') as f:
-        f.write(bs)
+        content_type = LOADER_MAP[image.get('vips-loader')]
+        assert update.content_type == content_type
 
-      assert instant_response['size'] == (image.get('width'), image.get('height'))
+        with open(f'{work_dir}/response{CONTENT_TYPE_MAP[content_type]}', 'wb') as f:
+          f.write(update.body)
+
+        assert instant_response['size'] == (image.get('width'), image.get('height'))
+      case _:
+        raise Exception('system error')
 
   if sqs_message is None:
     assert receive_sqs_message(img_server) is None
