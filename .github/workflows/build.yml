@@ -121,4 +121,4 @@ jobs:
         aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
         aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
         aws-region: us-east-1
-    - run: aws s3 cp ./imglambda.zip s3://${{env.REPO_BUCKET}}/imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13.zip
+    - run: aws s3 cp ./imglambda.zip s3://${{env.REPO_BUCKET}}/imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-amd64.zip
