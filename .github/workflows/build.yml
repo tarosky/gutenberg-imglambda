@@ -12,24 +12,19 @@ on:
 
 env:
   AWS_ACCOUNT_ID: '013230744746'
-  RELEASE_ACCESS_KEY_ID: AKIAQGFE5ESVJ7IYEUVR
-  REPO_BUCKET: gutenberg-ext-imglambda-repobucket-1i58nyytyztdl
+  RELEASE_ACCESS_KEY_ID_US_EAST_1: AKIAQGFE5ESVJ7IYEUVR
+  RELEASE_ACCESS_KEY_ID_AP_NORTHEAST_1: AKIAQGFE5ESVG2GCWRBX
+  REPO_BUCKET_US_EAST_1: gutenberg-ext-imglambda-repobucket-1i58nyytyztdl
+  REPO_BUCKET_AP_NORTHEAST_1: gutenberg-ext-imglambda-repobucket-mm723a9uponj
   TEST_ACCESS_KEY_ID: AKIAQGFE5ESVKGVB3XGS
   TEST_GENERATED_BUCKET: gutenberg-ext-imglambda-testgeneratedbucket-n8c79jl0mzd2
   TEST_ORIGINAL_BUCKET: gutenberg-ext-imglambda-testoriginalbucket-fz28m8cblu5t
   PYTHON_VERSION: 3.13.5
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
+  buildnumber:
+    runs-on: ubuntu-24.04-arm
     steps:
-    - uses: actions/checkout@main
-    - uses: actions/setup-python@main
-      with:
-        python-version: '~${{env.PYTHON_VERSION}}'
-    - name: Python Poetry Action
-      uses: abatilo/actions-poetry@master
-    - run: script/recreate-release-venv
     - name: Generate build number
       uses: onyxmueller/build-tag-number@main
       with:
@@ -38,19 +33,67 @@ jobs:
     - name: Print new build number
       run: echo "Build number is $BUILD_NUMBER"
     - name: Save the build number
-      run: echo "$BUILD_NUMBER" > work/BUILD_NUMBER
+      run: echo "$BUILD_NUMBER" > BUILD_NUMBER
     - name: Embed build number into code
       run: echo "build-$BUILD_NUMBER" > VERSION
-    - run: script/create-lambda
-    - uses: actions/upload-artifact@main
-      with:
-        name: artifact
-        path: work/imglambda.zip
-        if-no-files-found: error
     - uses: actions/upload-artifact@main
       with:
         name: build-number
-        path: work/BUILD_NUMBER
+        path: BUILD_NUMBER
+        if-no-files-found: error
+
+  build-amd64:
+    needs:
+    - buildnumber
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/download-artifact@main
+      with:
+        name: build-number
+    - name: set BUILD_NUMBER
+      run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
+    - uses: actions/checkout@main
+    - uses: actions/setup-python@main
+      with:
+        python-version: '~${{env.PYTHON_VERSION}}'
+    - name: Python Poetry Action
+      uses: abatilo/actions-poetry@master
+    - run: script/recreate-release-venv
+    - name: Embed build number into code
+      run: echo "build-$BUILD_NUMBER" > VERSION
+    - run: script/create-lambda
+    - run: mv work/imglambda.zip work/imglambda-amd64.zip
+    - uses: actions/upload-artifact@main
+      with:
+        name: artifact-amd64
+        path: work/imglambda-amd64.zip
+        if-no-files-found: error
+
+  build-arm64:
+    needs:
+    - buildnumber
+    runs-on: ubuntu-24.04-arm
+    steps:
+    - uses: actions/download-artifact@main
+      with:
+        name: build-number
+    - name: set BUILD_NUMBER
+      run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
+    - uses: actions/checkout@main
+    - uses: actions/setup-python@main
+      with:
+        python-version: '~${{env.PYTHON_VERSION}}'
+    - name: Python Poetry Action
+      uses: abatilo/actions-poetry@master
+    - run: script/recreate-release-venv
+    - name: Embed build number into code
+      run: echo "build-$BUILD_NUMBER" > VERSION
+    - run: script/create-lambda
+    - run: mv work/imglambda.zip work/imglambda-arm64.zip
+    - uses: actions/upload-artifact@main
+      with:
+        name: artifact-arm64
+        path: work/imglambda-arm64.zip
         if-no-files-found: error
 
   test:
@@ -80,20 +123,24 @@ jobs:
       with:
         files: work/report-imglambda.xml
 
-  release:
+  release-github:
     needs:
-    - build
+    - buildnumber
+    - build-amd64
+    - build-arm64
     - test
-    if: github.ref == 'refs/heads/master'
+    # if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     env:
       # Workaround for https://github.com/github/vscode-github-actions/issues/222
       BUILD_NUMBER: ""
-      ASSET_NAME: ""
     steps:
     - uses: actions/download-artifact@main
       with:
-        name: artifact
+        name: artifact-amd64
+    - uses: actions/download-artifact@main
+      with:
+        name: artifact-arm64
     - uses: actions/download-artifact@main
       with:
         name: build-number
@@ -113,12 +160,72 @@ jobs:
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
       with:
         upload_url: ${{steps.create_release.outputs.upload_url}}
-        asset_path: ./imglambda.zip
+        asset_path: ./imglambda-amd64.zip
         asset_name: imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-amd64.zip
         asset_content_type: application/octet-stream
+    - uses: actions/upload-release-asset@main
+      env:
+        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      with:
+        upload_url: ${{steps.create_release.outputs.upload_url}}
+        asset_path: ./imglambda-arm64.zip
+        asset_name: imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-arm64.zip
+        asset_content_type: application/octet-stream
+
+  release-s3-us-east-1:
+    needs:
+    - buildnumber
+    - build-amd64
+    - test
+    # if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    env:
+      # Workaround for https://github.com/github/vscode-github-actions/issues/222
+      BUILD_NUMBER: ""
+    steps:
+    - uses: actions/download-artifact@main
+      with:
+        name: artifact-amd64
+    - uses: actions/download-artifact@main
+      with:
+        name: build-number
+    - name: set BUILD_NUMBER
+      run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
     - uses: aws-actions/configure-aws-credentials@main
       with:
-        aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID}}
-        aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY}}
+        aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID_US_EAST_1}}
+        aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY_US_EAST_1}}
         aws-region: us-east-1
-    - run: aws s3 cp ./imglambda.zip s3://${{env.REPO_BUCKET}}/imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-amd64.zip
+    - run: >-
+        aws s3 cp
+        ./imglambda-amd64.zip
+        s3://${{env.REPO_BUCKET_US_EAST_1}}/imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-amd64.zip
+
+  release-s3-ap-northeast-1:
+    needs:
+    - buildnumber
+    - build-arm64
+    - test
+    # if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    env:
+      # Workaround for https://github.com/github/vscode-github-actions/issues/222
+      BUILD_NUMBER: ""
+    steps:
+    - uses: actions/download-artifact@main
+      with:
+        name: artifact-arm64
+    - uses: actions/download-artifact@main
+      with:
+        name: build-number
+    - name: set BUILD_NUMBER
+      run: echo "BUILD_NUMBER=$(< ./BUILD_NUMBER)" >> $GITHUB_ENV
+    - uses: aws-actions/configure-aws-credentials@main
+      with:
+        aws-access-key-id: ${{env.RELEASE_ACCESS_KEY_ID_AP_NORTHEAST_1}}
+        aws-secret-access-key: ${{secrets.RELEASE_AWS_SECRET_ACCESS_KEY_AP_NORTHEAST_1}}
+        aws-region: ap-northeast-1
+    - run: >-
+        aws s3 cp
+        ./imglambda-arm64.zip
+        s3://${{env.REPO_BUCKET_AP_NORTHEAST_1}}/imglambda.build-${{env.BUILD_NUMBER}}-awslambda-python3.13-arm64.zip
