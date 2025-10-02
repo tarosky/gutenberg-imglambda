@@ -13,12 +13,13 @@ from http import HTTPStatus
 from logging import Logger
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Optional, Self, Tuple
+from typing import Any, Callable, Literal, Optional, Self, Tuple, cast
 from urllib import parse
 
 import boto3
 from botocore.exceptions import ClientError
 from dateutil import parser, tz
+from mypy_boto3_lambda import LambdaClient
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_s3.type_defs import (
     GetObjectOutputTypeDef,
@@ -32,9 +33,14 @@ from pyvips import Extend, Image  # type: ignore
 
 import imglambda
 from imglambda.typing import (
+    ErrorLambdaResponse,
     HttpPath,
     OriginRequestEvent,
     Request,
+    ResizeRequestImageData,
+    ResizeRequestImageSource,
+    ResizeRequestPayload,
+    ResizeResponsePayload,
     ResponseResult,
     S3Key
 )
@@ -50,11 +56,21 @@ CACHE_CONTROL = 'x-res-cache-control'
 LAMBDA_EXPIRATION_MARGIN = 60
 RESPONSE_BODY_LIMIT = 1024 * 1024
 
+# Maximum payload size for AWS Lambda is 6MiB
+MAX_IMAGE_PAYLOAD_SIZE = 4 * 1024 * 1024 + 512 * 1024  # 4.5MiB
+
 PADDING_COLOR = [230.0, 230.0, 230.0]
 
 long_exts = [
     '.min.css',
 ]
+
+MIME_TO_EXT = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/avif': '.avif',
+}
 
 expiration_re = re.compile(r'\s*([\w-]+)="([^"]*)"(:?,|$)')
 path_subsize_re = re.compile(r'-(\d+)x(\d+)(\.[A-Za-z0-9]+)$')
@@ -123,9 +139,14 @@ class FieldUpdate:
 
 
 @dataclasses.dataclass(frozen=True)
+class Base64Str:
+  base64_str: str
+
+
+@dataclasses.dataclass(frozen=True)
 class InstantResponse:
   status: int
-  body: Optional[bytes | str]
+  body: Optional[bytes | str | Base64Str]
   cache_control: str
   content_type: Optional[str]
   vips_us: Optional[int]
@@ -153,6 +174,7 @@ class XParams:
   expiration_margin: int
   basedir: str
   resize_mode: ResizeMode
+  resize_function: str
 
 
 class OptimImageType(Enum):
@@ -275,13 +297,13 @@ class AcceptHeader:
     self.types = types
 
   @classmethod
-  def from_str(cls, accept_header: str) -> Self:
+  def from_str(cls, accept: str) -> Self:
     types = [False] * len(OptimImageType)
 
-    if 'image/avif' in accept_header:
+    if 'image/avif' in accept:
       types[OptimImageType.AVIF.value] = True
 
-    if 'image/webp' in accept_header:
+    if 'image/webp' in accept:
       types[OptimImageType.WEBP.value] = True
 
     return cls(types)
@@ -556,12 +578,32 @@ class ResizeParam:
   source: HttpPath
   width: int
   height: int
+  mime: str
+  quality: int
+
+  @staticmethod
+  def parse_accept_header(accept: AcceptHeader, source: HttpPath) -> Tuple[str, int]:
+    if accept.supports(OptimImageType.WEBP):
+      mime = 'image/webp'
+    else:
+      match Path(source).suffix:
+        case '.jpg':
+          mime = 'image/jpeg'
+        case '.jpeg':
+          mime = 'image/jpeg'
+        case '.png':
+          mime = 'image/png'
+        case _:
+          raise Exception('system error')
+
+    return mime, 80
 
   @classmethod
   def maybe_from_querystring(
       cls,
       source: HttpPath,
       qs: dict[str, list[str]],
+      accept: AcceptHeader,
   ) -> Optional['ResizeParam']:
     if 'w' not in qs or 'h' not in qs:
       return None
@@ -575,10 +617,12 @@ class ResizeParam:
     if width <= 0 or height <= 0:
       return None
 
-    return cls(source, width, height)
+    mime, quality = cls.parse_accept_header(accept, source)
+
+    return cls(source, width, height, mime, quality)
 
   @classmethod
-  def maybe_from_path(cls, path: HttpPath) -> Optional['ResizeParam']:
+  def maybe_from_path(cls, path: HttpPath, accept: AcceptHeader) -> Optional['ResizeParam']:
     m = path_subsize_re.search(str(path))
     if m is None:
       return None
@@ -594,7 +638,64 @@ class ResizeParam:
 
     source = HttpPath(path[:m.start()] + str(m[3]))
 
-    return cls(source, width, height)
+    mime, quality = cls.parse_accept_header(accept, source)
+
+    return cls(source, width, height, mime, quality)
+
+
+def resize_image(
+    logger: Callable[[str, dict[str, Any]], None],
+    image: Image,
+    target: Size,
+    focalarea: Optional[Area],
+) -> Image | Literal['INVALID_METADATA']:
+  original = Size.from_image(image)
+
+  if focalarea is None:
+    focalarea = Area(0, 0, original.width, original.height)
+
+  if not focalarea.is_in(original):
+    return 'INVALID_METADATA'
+
+  scale = calc_resize_scale(original, target, focalarea)
+  if scale is None:
+    resized = original
+    resized_focalarea = focalarea
+  else:
+    assert scale[0] < scale[1]
+    image = image.resize(scale[0] / scale[1])
+    resized = Size.from_image(image)
+    resized_focalarea = focalarea.scale(scale[0], scale[1]).fit_into(resized)
+
+  croparea = calc_crop(resized, target, resized_focalarea)
+  padding, padded = calc_padding(resized, croparea)
+
+  image = image.extract_area(padded.x, padded.y, padded.width, padded.height)
+
+  if padding != NO_FOUR_SIDES:
+    size = padding.add_to(padded.to_size())
+    image = image.embed(
+        padding.left,
+        padding.top,
+        size.width,
+        size.height,
+        extend=Extend.BACKGROUND,
+        background=PADDING_COLOR)
+
+  logger(
+      'resize param', {
+          'original': original,
+          'target': target,
+          'focalarea': focalarea,
+          'resized_focalarea': resized_focalarea,
+          'scale': scale,
+          'resized': resized,
+          'croparea': croparea,
+          'padding': padding,
+          'padded': padded,
+      })
+
+  return image
 
 
 class ImgServer:
@@ -606,6 +707,7 @@ class ImgServer:
       region: str,
       sqs: SQSClient,
       s3: S3Client,
+      awslambda: LambdaClient,
       generated_domain: str,
       original_bucket: str,
       generated_key_prefix: str,
@@ -617,11 +719,13 @@ class ImgServer:
       expiration_margin: int,
       basedir: str,
       resize_mode: ResizeMode,
+      resize_function: Optional[str],
   ):
     self.log = log
     self.region = region
     self.sqs = sqs
     self.s3 = s3
+    self.awslambda = awslambda
     self.generated_domain = generated_domain
     self.generated_bucket = generated_domain.split('.', 1)[0]
     self.original_bucket = original_bucket
@@ -634,10 +738,11 @@ class ImgServer:
     self.expiration_margin = datetime.timedelta(seconds=expiration_margin)
     self.basedir = basedir
     self.resize_mode = resize_mode
-    self.log_context = {'path': '', 'qstr': '', 'accept_header': ''}
+    self.log_context = {'path': '', 'qstr': '', 'accept': ''}
     self.cache_control_perm = f'public, max-age={self.perm_resp_max_age}'
     self.cache_control_temp = f'public, max-age={self.temp_resp_max_age}'
     self.cache_control_error = f'public, max-age={self.error_max_age}'
+    self.resize_function = resize_function
 
   @classmethod
   def from_lambda(
@@ -659,6 +764,7 @@ class ImgServer:
       bypass_minifier_patterns = get_header_or(req, 'x-env-bypass-minifier-patterns')
       basedir = get_header_or(req, 'x-env-basedir')
       resize_mode = ResizeMode[get_header_or(req, 'x-env-resize-mode', 'Disabled').upper()]
+      resize_function = get_header_or(req, 'x-env-resize-function')
     except KeyError as e:
       log.warning({
           'message': 'environment variable not found',
@@ -678,11 +784,13 @@ class ImgServer:
         bypass_minifier_patterns=bypass_minifier_patterns,
         expiration_margin=expiration_margin,
         basedir=basedir,
-        resize_mode=resize_mode)
+        resize_mode=resize_mode,
+        resize_function=resize_function)
 
     if server_key not in cls.instances:
       sqs = boto3.client('sqs', region_name=region)
       s3 = boto3.client('s3', region_name=region)
+      awslambda = boto3.client('lambda', region_name=region)
       path_spec = (
           None if bypass_minifier_patterns == '' else PathSpec.from_lines(
               GitWildMatchPattern, bypass_minifier_patterns.split(',')))
@@ -691,6 +799,7 @@ class ImgServer:
           region=region,
           sqs=sqs,
           s3=s3,
+          awslambda=awslambda,
           generated_domain=generated_domain,
           original_bucket=original_bucket,
           generated_key_prefix=generated_key_prefix,
@@ -701,7 +810,8 @@ class ImgServer:
           bypass_path_spec=path_spec,
           expiration_margin=expiration_margin,
           basedir=basedir,
-          resize_mode=resize_mode)
+          resize_mode=resize_mode,
+          resize_function=None if resize_function == '' else resize_function)
 
     return cls.instances[server_key]
 
@@ -794,19 +904,60 @@ class ImgServer:
     self.sqs.send_message(QueueUrl=self.sqs_queue_url, MessageBody=json_dump(body))
     self.log_debug('enqueued', {'body': body})
 
-  def resize_image(
+  def call_process_resize(
       self,
-      filename: str,
-      target: Size,
-      focalarea: Optional[Area],
-  ) -> Image | InstantResponse | None:
-    image: Image = Image.new_from_file(filename)
-    original = Size.from_image(image)
+      resize_param: ResizeParam,
+      strict: bool,
+  ) -> Optional[InstantResponse]:
+    match self.resize_function:
+      case None:
+        resize = self.process_resize
+      case str():
+        resize = self.external_process_resize
+      case _:
+        raise Exception('system error')
 
-    if focalarea is None:
-      focalarea = Area(0, 0, original.width, original.height)
+    return resize(resize_param, strict)
 
-    if not focalarea.is_in(original):
+  def external_process_resize(
+      self,
+      resize_param: ResizeParam,
+      strict: bool,
+  ) -> Optional[InstantResponse]:
+    assert self.resize_function is not None
+    key = key_from_path(resize_param.source)
+
+    try:
+      res = self.s3.get_object(Bucket=self.original_bucket, Key=key)
+      if MAX_IMAGE_PAYLOAD_SIZE < res['ContentLength']:
+        image: ResizeRequestImageData | ResizeRequestImageSource = {
+            'bucket': self.original_bucket,
+            'key': key,
+        }
+      else:
+        image = {'base64': base64.b64encode(res['Body'].read()).decode()}
+    except ClientError as e:
+      if is_not_found_client_error(e):
+        return InstantResponse(
+            status=HTTPStatus.NOT_FOUND,
+            body='Image file not found',
+            cache_control=self.cache_control_error,
+            content_type='text/plain',
+            vips_us=None,
+            img_size=None)
+      raise e
+
+    payload: ResizeRequestPayload = {
+        'target': (resize_param.width, resize_param.height),
+        'image': image,
+        'mime': resize_param.mime,
+        'quality': resize_param.quality,
+    }
+
+    try:
+      orig_meta = ObjectMeta.from_original_object(res)
+    except InvalidMetadata as e:
+      self.log_warning('failed to read orig metadata', {'reason': str(e), 'key': key})
       return InstantResponse(
           status=HTTPStatus.INTERNAL_SERVER_ERROR,
           body='Invalid metadata',
@@ -815,66 +966,111 @@ class ImgServer:
           vips_us=None,
           img_size=None)
 
-    scale = calc_resize_scale(original, target, focalarea)
-    if scale is None:
-      resized = original
-      resized_focalarea = focalarea
-    else:
-      assert scale[0] < scale[1]
-      image = image.resize(scale[0] / scale[1])
-      resized = Size.from_image(image)
-      resized_focalarea = focalarea.scale(scale[0], scale[1]).fit_into(resized)
+    target = Size(resize_param.width, resize_param.height)
+    if strict and target not in orig_meta.subsizes:
+      return None
 
-    croparea = calc_crop(resized, target, resized_focalarea)
-    padding, padded = calc_padding(resized, croparea)
+    start_ns = time.time_ns()
 
-    image = image.extract_area(padded.x, padded.y, padded.width, padded.height)
+    if orig_meta.focalarea is not None:
+      payload['focalarea'] = (
+          orig_meta.focalarea.x,
+          orig_meta.focalarea.y,
+          orig_meta.focalarea.width,
+          orig_meta.focalarea.height,
+      )
 
-    if padding != NO_FOUR_SIDES:
-      size = padding.add_to(padded.to_size())
-      image = image.embed(
-          padding.left,
-          padding.top,
-          size.width,
-          size.height,
-          extend=Extend.BACKGROUND,
-          background=PADDING_COLOR)
+    try:
+      res2 = self.awslambda.invoke(
+          FunctionName=self.resize_function,
+          Payload=json.dumps(dict(payload), separators=(',', ':'), sort_keys=True))
+      response: ResizeResponsePayload | ErrorLambdaResponse = json.loads(res2['Payload'].read())
 
-    self.log_debug(
-        'resize param', {
-            'original': original,
-            'target': target,
-            'focalarea': focalarea,
-            'resized_focalarea': resized_focalarea,
-            'scale': scale,
-            'resized': resized,
-            'croparea': croparea,
-            'padding': padding,
-            'padded': padded,
-        })
+      vips_us = (time.time_ns() - start_ns) // 1000
 
-    return image
+      if 'errorType' in response:
+        response = cast(ErrorLambdaResponse, response)
+        self.log_warning(
+            'failed to call resize', {
+                'reason': f"{response['errorType']}: {response['errorMessage']}",
+                'key': key,
+                'traceback': '\n'.join(response['stackTrace']),
+            })
+        return InstantResponse(
+            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            body='failed to call resize',
+            cache_control=self.cache_control_error,
+            content_type='text/plain',
+            vips_us=None,
+            img_size=None)
+
+      result = response['result']
+
+      if isinstance(result, dict):
+        if RESPONSE_BODY_LIMIT < result['size']:
+          return InstantResponse(
+              status=HTTPStatus.BAD_REQUEST,
+              body='Response size too large',
+              cache_control=self.cache_control_error,
+              content_type='text/plain',
+              vips_us=None,
+              img_size=None)
+        return InstantResponse(
+            status=HTTPStatus.OK,
+            body=Base64Str(result['body_b64']),
+            cache_control=self.cache_control_perm,
+            content_type=resize_param.mime,
+            vips_us=vips_us,
+            img_size=result['size'])
+
+      match result:
+        case 'INVALID_IMAGE':
+          return InstantResponse(
+              status=HTTPStatus.INTERNAL_SERVER_ERROR,
+              body='Invalid image file',
+              cache_control=self.cache_control_error,
+              content_type='text/plain',
+              vips_us=None,
+              img_size=None)
+        case 'INVALID_METADATA':
+          return InstantResponse(
+              status=HTTPStatus.INTERNAL_SERVER_ERROR,
+              body='Invalid metadata',
+              cache_control=self.cache_control_error,
+              content_type='text/plain',
+              vips_us=None,
+              img_size=None)
+        case 'RESPONSE_TOO_LARGE':
+          return InstantResponse(
+              status=HTTPStatus.BAD_REQUEST,
+              body='Response size too large',
+              cache_control=self.cache_control_error,
+              content_type='text/plain',
+              vips_us=None,
+              img_size=None)
+        case _:
+          raise Exception('system error')
+    except Exception as e:
+      self.log_warning(
+          'failed to call resize', {
+              'reason': str(e),
+              'key': key,
+              'traceback': traceback.format_exc(),
+          })
+      return InstantResponse(
+          status=HTTPStatus.INTERNAL_SERVER_ERROR,
+          body='failed to call resize',
+          cache_control=self.cache_control_error,
+          content_type='text/plain',
+          vips_us=None,
+          img_size=None)
 
   def process_resize(
       self,
       resize_param: ResizeParam,
-      accept: AcceptHeader,
       strict: bool,
   ) -> Optional[InstantResponse]:
     key = key_from_path(resize_param.source)
-    if accept.supports(OptimImageType.WEBP):
-      extension = '.webp'
-      quality = 80
-      content_type = 'image/webp'
-    else:
-      extension = Path(resize_param.source).suffix
-      quality = 80
-      if extension in ['.jpg', '.jpeg']:
-        content_type = 'image/jpeg'
-      elif extension == '.png':
-        content_type = 'image/png'
-      else:
-        raise Exception('system error')
 
     with NamedTemporaryFile(delete_on_close=False) as orig:
       try:
@@ -912,11 +1108,11 @@ class ImgServer:
       start_ns = time.time_ns()
 
       try:
-        match self.resize_image(orig.name, target, orig_meta.focalarea):
-          case None:
-            return None
+        image: Image = Image.new_from_file(orig.name)
+        match resize_image(self.log_debug, image, target, orig_meta.focalarea):
           case Image() as image:
-            resized: bytes = image.write_to_buffer(extension, Q=quality)
+            resized: bytes = image.write_to_buffer(
+                MIME_TO_EXT[resize_param.mime], Q=resize_param.quality)
 
             if RESPONSE_BODY_LIMIT < len(resized):
               return InstantResponse(
@@ -933,11 +1129,17 @@ class ImgServer:
                 status=HTTPStatus.OK,
                 body=resized,
                 cache_control=self.cache_control_perm,
-                content_type=content_type,
+                content_type=resize_param.mime,
                 vips_us=vips_us,
                 img_size=len(resized))
-          case InstantResponse() as response:
-            return response
+          case 'INVALID_METADATA':
+            return InstantResponse(
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                body='Invalid metadata',
+                cache_control=self.cache_control_error,
+                content_type='text/plain',
+                vips_us=None,
+                img_size=None)
           case _:
             raise Exception('system error')
       except Exception as e:
@@ -959,27 +1161,27 @@ class ImgServer:
       self,
       path: HttpPath,
       qs: dict[str, list[str]],
-      accept_header: AcceptHeader,
+      accept: AcceptHeader,
   ) -> FieldUpdate | InstantResponse:
     match self.resize_mode:
       case ResizeMode.DISABLED:
         pass
       case ResizeMode.STRICT:
-        resize_param = ResizeParam.maybe_from_path(path)
+        resize_param = ResizeParam.maybe_from_path(path, accept)
         if resize_param is not None:
-          instant_res = self.process_resize(resize_param, accept_header, True)
+          instant_res = self.call_process_resize(resize_param, True)
           if instant_res is not None:
             return instant_res
       case ResizeMode.RELAXED:
-        resize_param = ResizeParam.maybe_from_path(path)
+        resize_param = ResizeParam.maybe_from_path(path, accept)
         if resize_param is not None:
-          instant_res = self.process_resize(resize_param, accept_header, False)
+          instant_res = self.call_process_resize(resize_param, False)
           if instant_res is not None:
             return instant_res
       case ResizeMode.FREESTYLE:
-        resize_param = ResizeParam.maybe_from_querystring(path, qs)
+        resize_param = ResizeParam.maybe_from_querystring(path, qs, accept)
         if resize_param is not None:
-          instant_res = self.process_resize(resize_param, accept_header, False)
+          instant_res = self.call_process_resize(resize_param, False)
           if instant_res is not None:
             return instant_res
 
@@ -1007,7 +1209,7 @@ class ImgServer:
       if need_update:
         self.keep_uptodate(key)
 
-      if not accept_header.has_response_type(orig_meta.optimize_type):
+      if not accept.has_response_type(orig_meta.optimize_type):
         return FieldUpdate(reason='opt not accepted', res_cache_control=self.cache_control_perm)
 
       if need_update:
@@ -1056,7 +1258,7 @@ class ImgServer:
       self,
       path: HttpPath,
       qs: dict[str, list[str]],
-      accept_header: AcceptHeader,
+      accept: AcceptHeader,
   ) -> FieldUpdate | InstantResponse:
 
     def run(path: HttpPath):
@@ -1069,7 +1271,7 @@ class ImgServer:
       ext = get_normalized_extension(path)
 
       if ext in ['.jpg', '.jpeg', '.png']:
-        return self.process_for_image_requester(path, qs, accept_header)
+        return self.process_for_image_requester(path, qs, accept)
       elif ext == '.css':
         return self.process_for_css_requester(path)
       else:
@@ -1096,13 +1298,13 @@ class ImgServer:
 
     return fu
 
-  def set_log_context(self, path: HttpPath, qstr: str, accept_header: str) -> None:
-    self.log_context = {'path': str(path), 'qstr': qstr, 'accept_header': accept_header}
+  def set_log_context(self, path: HttpPath, qstr: str, accept: str) -> None:
+    self.log_context = {'path': str(path), 'qstr': qstr, 'accept': accept}
 
 
 def lambda_main(event: OriginRequestEvent) -> Request | ResponseResult:
   req = event['Records'][0]['cf']['request']
-  accept_header = req['headers']['accept'][0]['value'] if 'accept' in req['headers'] else ''
+  accept = req['headers']['accept'][0]['value'] if 'accept' in req['headers'] else ''
 
   # Set default value
   req['headers'][CACHE_CONTROL] = [{'value': ''}]
@@ -1115,8 +1317,8 @@ def lambda_main(event: OriginRequestEvent) -> Request | ResponseResult:
   path = req['uri']
   qstr = req['querystring']
 
-  server.set_log_context(path, qstr, accept_header)
-  result = server.process(path, parse.parse_qs(qstr), AcceptHeader.from_str(accept_header))
+  server.set_log_context(path, qstr, accept)
+  result = server.process(path, parse.parse_qs(qstr), AcceptHeader.from_str(accept))
 
   if isinstance(result, FieldUpdate):
     if result.origin_domain is not None:
@@ -1166,11 +1368,14 @@ def lambda_main(event: OriginRequestEvent) -> Request | ResponseResult:
     match result.body:
       case None:
         pass
-      case str():
-        response_result['body'] = result.body
+      case Base64Str() as body:
+        response_result['body'] = body.base64_str
+        response_result['bodyEncoding'] = 'base64'
+      case str() as body:
+        response_result['body'] = body
         response_result['bodyEncoding'] = 'text'
-      case bytes():
-        response_result['body'] = base64.b64encode(result.body).decode()
+      case bytes() as body:
+        response_result['body'] = base64.b64encode(body).decode()
         response_result['bodyEncoding'] = 'base64'
       case _:
         raise Exception('system error')
@@ -1188,3 +1393,48 @@ def lambda_main(event: OriginRequestEvent) -> Request | ResponseResult:
     return response_result
   else:
     raise Exception('system error')
+
+
+def log_debug(message: str, dict: dict[str, Any]) -> None:
+  logger.debug({
+      'message': message,
+      **dict,
+  })
+
+
+def lambda_resize(event: ResizeRequestPayload) -> ResizeResponsePayload:
+  if 'base64' in event['image']:
+    try:
+      image: Image = Image.new_from_buffer(
+          base64.b64decode(event['image']['base64']), '')  # type: ignore[typeddict-item]
+
+      resized = resize_image(
+          log_debug,
+          image,
+          Size(*event['target']),
+          Area(*event['focalarea']) if 'focalarea' in event else None,
+      )
+
+      match resized:
+        case Image() as image:
+          image_bs: bytes = image.write_to_buffer(MIME_TO_EXT[event['mime']], Q=event['quality'])
+          if MAX_IMAGE_PAYLOAD_SIZE < len(image_bs):
+            return {'result': 'RESPONSE_TOO_LARGE'}
+
+          return {
+              'result': {
+                  'body_b64': base64.b64encode(image_bs).decode(),
+                  'size': len(image_bs),
+              }
+          }
+        case 'INVALID_METADATA':
+          return {'result': 'INVALID_METADATA'}
+        case _:
+          pass
+    except Exception as e:
+      return {
+          'result': 'INVALID_IMAGE',
+          'message': f'{str(e)}\n{traceback.format_exc()}',
+      }
+
+  raise Exception('system error')
