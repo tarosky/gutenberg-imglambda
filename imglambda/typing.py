@@ -1,8 +1,35 @@
-from typing import Literal, NewType, NotRequired, ReadOnly, TypedDict
+from typing import Literal, NewType, NotRequired, ReadOnly, Tuple, TypedDict
 
 HttpPath = NewType('HttpPath', str)
 S3Key = NewType('S3Key', str)
 FilePath = NewType('FilePath', str)
+
+
+class ResizeResponseImage(TypedDict):
+  body_b64: str
+  size: int
+
+
+class ResizeResponsePayload(TypedDict):
+  result: ResizeResponseImage | Literal['INVALID_IMAGE', 'INVALID_METADATA', 'RESPONSE_TOO_LARGE']
+  message: NotRequired[str]
+
+
+class ResizeRequestImageSource(TypedDict):
+  bucket: str
+  key: str
+
+
+class ResizeRequestImageData(TypedDict):
+  base64: str
+
+
+class ResizeRequestPayload(TypedDict):
+  image: ResizeRequestImageData | ResizeRequestImageSource
+  target: Tuple[int, int]
+  mime: str
+  quality: int
+  focalarea: NotRequired[Tuple[int, int, int, int]]
 
 
 class Header(TypedDict):
@@ -108,3 +135,10 @@ class ResponseResult(TypedDict):
   headers: NotRequired[dict[str, list[Header]]]
   status: str
   statusDescription: NotRequired[str]
+
+
+class ErrorLambdaResponse(TypedDict):
+  errorMessage: str
+  errorType: str
+  requestId: str
+  stackTrace: list[str]
