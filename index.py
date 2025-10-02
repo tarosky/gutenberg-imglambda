@@ -1,3 +1,5 @@
+import json
+
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from imglambda.originrequest import index as originrequest
@@ -6,6 +8,8 @@ from imglambda.typing import (
     OriginRequestEvent,
     OriginResponseEvent,
     Request,
+    ResizeRequestPayload,
+    ResizeResponsePayload,
     Response,
     ResponseResult
 )
@@ -20,6 +24,23 @@ def origin_request_lambda_handler(
   # print(json.dumps(event))
 
   ret = originrequest.lambda_main(event)
+
+  # # For debugging
+  # print('return:')
+  # print(json.dumps(ret))
+
+  return ret
+
+
+def resize_lambda_handler(
+    event: ResizeRequestPayload,
+    _: LambdaContext,
+) -> ResizeResponsePayload:
+  # # For debugging
+  # print('event:')
+  # print(json.dumps(event))
+
+  ret = originrequest.lambda_resize(event)
 
   # # For debugging
   # print('return:')
