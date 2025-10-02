@@ -6,7 +6,9 @@ export AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY="$(< config/development/secret-access-key)"
 export AWS_SECRET_ACCESS_KEY
 
+s3_bucket_us_east_1="$(< config/development/s3-bucket-us-east-1)"
 s3_bucket="$(< config/development/s3-bucket)"
 s3_key_prefix="$(< config/development/s3-key-prefix)"
 
+find work/development -type f -printf '%P\0' | xargs -0 -I{} aws s3 cp "work/development/{}" "s3://$s3_bucket_us_east_1/$s3_key_prefix{}"
 find work/development -type f -printf '%P\0' | xargs -0 -I{} aws s3 cp "work/development/{}" "s3://$s3_bucket/$s3_key_prefix{}"

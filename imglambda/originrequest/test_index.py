@@ -32,6 +32,7 @@ from imglambda.typing import HttpPath
 
 from .index import (
     FOCALAREA_METADATA,
+    MIME_TO_EXT,
     OPTIMIZE_QUALITY_METADATA,
     OPTIMIZE_TYPE_METADATA,
     SUBSIZES_METADATA,
@@ -107,13 +108,6 @@ LOADER_MAP = {
     'heifload_buffer': 'image/avif',
 }
 
-CONTENT_TYPE_MAP = {
-    JPEG_MIME: '.jpg',
-    PNG_MIME: '.png',
-    WEBP_MIME: '.webp',
-    AVIF_MIME: '.avif',
-}
-
 
 def get_bypass_minifier_patterns(key_prefix: str) -> list[str]:
   return [
@@ -149,12 +143,14 @@ def create_img_server(
   warnings.filterwarnings('ignore', category=ResourceWarning, message='unclosed.*<ssl.SSLSocket.*>')
   sqs = sess.client('sqs', region_name=REGION)
   s3 = sess.client('s3', region_name=REGION)
+  awslambda = sess.client('lambda', region_name=REGION)
 
   return ImgServer(
       log=log,
       region=REGION,
       sqs=sqs,
       s3=s3,
+      awslambda=awslambda,
       generated_domain=f"{read_test_config('generated-bucket')}.s3.example.com",
       original_bucket=read_test_config('original-bucket'),
       generated_key_prefix=GENERATED_KEY_PREFIX,
@@ -166,7 +162,8 @@ def create_img_server(
           GitWildMatchPattern, get_bypass_minifier_patterns(key_prefix)),
       expiration_margin=expiration_margin,
       basedir=basedir,
-      resize_mode=resize_mode)
+      resize_mode=resize_mode,
+      resize_function=None)
 
 
 def get_test_sqs_queue_name_from_url(sqs_queue_url: str) -> str:
@@ -1577,10 +1574,10 @@ def test_generated(
         image = Image.new_from_buffer(update.body, '')
         assert 'size' in instant_response
 
-        content_type = LOADER_MAP[image.get('vips-loader')]
-        assert update.content_type == content_type
+        mime = LOADER_MAP[image.get('vips-loader')]
+        assert update.content_type == mime
 
-        with open(f'{work_dir}/response{CONTENT_TYPE_MAP[content_type]}', 'wb') as f:
+        with open(f'{work_dir}/response{MIME_TO_EXT[mime]}', 'wb') as f:
           f.write(update.body)
 
         assert instant_response['size'] == (image.get('width'), image.get('height'))
