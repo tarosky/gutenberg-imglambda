@@ -18,6 +18,7 @@ class ResizeResponsePayload(TypedDict):
 class ResizeRequestImageSource(TypedDict):
   bucket: str
   key: str
+  version: str
 
 
 class ResizeRequestImageData(TypedDict):
