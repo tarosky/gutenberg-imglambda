@@ -933,6 +933,7 @@ class ImgServer:
         image: ResizeRequestImageData | ResizeRequestImageSource = {
             'bucket': self.original_bucket,
             'key': key,
+            'version': res['VersionId'],
         }
       else:
         image = {'base64': base64.b64encode(res['Body'].read()).decode()}
