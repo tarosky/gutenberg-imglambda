@@ -1,3 +1,5 @@
+import os
+
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from imglambda.originrequest import index as originrequest
@@ -38,7 +40,8 @@ def resize_lambda_handler(
   # print('event:')
   # print(json.dumps(event))
 
-  ret = originrequest.lambda_resize(event)
+  ret = originrequest.ImageResizer.lambda_resize(
+      originrequest.log_debug, os.environ['REGION'], event)
 
   # # For debugging
   # print('return:')
