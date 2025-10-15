@@ -1,3 +1,4 @@
+import base64
 import datetime
 import json
 import logging
@@ -39,6 +40,7 @@ from .index import (
     TIMESTAMP_METADATA,
     AcceptHeader,
     Area,
+    Base64Str,
     FieldUpdate,
     ImgServer,
     InstantResponse,
@@ -62,6 +64,7 @@ TEXT_MIME = 'text/plain'
 CSS_NAME = 'スタイル.css'
 CSS_NAME_Q = '%E3%82%B9%E3%82%BF%E3%82%A4%E3%83%AB.css'
 JPG_NAME = 'image.jpg'
+OVER5MB_NAME = 'over5mb.jpg'
 JPG_NAME_U = 'image.JPG'
 JPG_NAME_MB = 'テスト.jpg'
 JPG_NAME_MB_Q = '%E3%83%86%E3%82%B9%E3%83%88.jpg'
@@ -1238,6 +1241,25 @@ TESTS: list[Parameters] = [
         },
     },
     {
+        'id': 'resize_freestyle/largejpg/accepted',
+        'original': OVER5MB_NAME,
+        'generated': None,
+        'config': {
+            'resize_mode': ResizeMode.FREESTYLE,
+        },
+        'request_path': OVER5MB_NAME,
+        'query_string': {
+            'w': '200',
+            'h': '150',
+        },
+        'expected_instant_response': {
+            'status': HTTPStatus.OK,
+            'content_type': WEBP_MIME,
+            'cache_control': CACHE_CONTROL_PERM,
+            'size': (200, 150),
+        },
+    },
+    {
         'id': 'resize_freestyle/jpg/unaccepted',
         'original': JPG_NAME,
         'generated': None,
@@ -1570,15 +1592,16 @@ def test_generated(
         assert 'size' not in instant_response
       case str():
         assert 'size' not in instant_response
-      case bytes():
-        image = Image.new_from_buffer(update.body, '')
+      case Base64Str():
+        bytes = base64.b64decode(update.body.base64_str)
+        image = Image.new_from_buffer(bytes, '')
         assert 'size' in instant_response
 
         mime = LOADER_MAP[image.get('vips-loader')]
         assert update.content_type == mime
 
         with open(f'{work_dir}/response{MIME_TO_EXT[mime]}', 'wb') as f:
-          f.write(update.body)
+          f.write(bytes)
 
         assert instant_response['size'] == (image.get('width'), image.get('height'))
       case _:
